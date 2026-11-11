@@ -75,7 +75,7 @@ A real-time communication web app separated cleanly into `backend/` and `fronten
    - Copy the deployed Render URL (e.g. `https://pulse-connect-backend.onrender.com`).
 3. **Deploy Frontend on Netlify** (uses [`netlify.toml`](netlify.toml)):
    - Create a **New site from Git** connected to the same GitHub repo.
-   - Netlify will automatically publish `frontend/`.
+   - Leave **Base directory** empty (blank) in Netlify's UI — [`netlify.toml`](netlify.toml) already sets `publish = "frontend"`.
    - In **Site configuration -> Environment variables**, add:
      - `BACKEND_URL` = your Render URL (e.g. `https://pulse-connect-backend.onrender.com`)
    - Trigger a redeploy so [`netlify.toml`](netlify.toml) writes `BACKEND_URL` into `frontend/config.js`.
