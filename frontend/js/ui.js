@@ -265,20 +265,28 @@ export function renderMessages({
       bubble.appendChild(textDiv);
     }
 
-    if (msg.attachment) {
-      if (msg.attachment.type.startsWith('image/')) {
+    if (msg.attachment && msg.attachment.dataUrl) {
+      const mime = String(msg.attachment.type || '');
+      if (mime.startsWith('image/')) {
         const img = document.createElement('img');
         img.className = 'msg-attachment-img';
         img.src = msg.attachment.dataUrl;
-        img.alt = msg.attachment.name;
+        img.alt = msg.attachment.name || 'Photo';
         img.addEventListener('click', () => onOpenLightbox(msg.attachment.dataUrl));
         bubble.appendChild(img);
+      } else if (mime.startsWith('audio/')) {
+        const audio = document.createElement('audio');
+        audio.className = 'msg-attachment-audio';
+        audio.controls = true;
+        audio.preload = 'metadata';
+        audio.src = msg.attachment.dataUrl;
+        bubble.appendChild(audio);
       } else {
         const link = document.createElement('a');
         link.className = 'msg-attachment-file';
         link.href = msg.attachment.dataUrl;
-        link.download = msg.attachment.name;
-        link.textContent = `📎 ${msg.attachment.name}`;
+        link.download = msg.attachment.name || 'file';
+        link.textContent = `📎 ${msg.attachment.name || 'Attachment'}`;
         bubble.appendChild(link);
       }
     }

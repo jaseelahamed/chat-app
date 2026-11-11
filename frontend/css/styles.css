@@ -1041,6 +1041,75 @@ body {
   font-size: 13px;
 }
 
+.msg-attachment-audio {
+  display: block;
+  width: 240px;
+  max-width: 100%;
+  height: 40px;
+  margin-top: 6px;
+  border-radius: 10px;
+}
+
+.voice-recording-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 16px;
+  background: rgba(239, 68, 68, 0.14);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+}
+
+.voice-rec-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fecaca;
+}
+
+.rec-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #ef4444;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.9);
+  animation: pulseGlow 1.2s infinite;
+}
+
+.voice-rec-timer {
+  font-variant-numeric: tabular-nums;
+  color: #fff;
+}
+
+.voice-rec-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.voice-rec-btn {
+  border: none;
+  border-radius: 10px;
+  padding: 7px 12px;
+  font-family: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.voice-rec-btn.cancel {
+  background: rgba(255, 255, 255, 0.1);
+  color: #e2e8f0;
+}
+
+.voice-rec-btn.send {
+  background: linear-gradient(135deg, var(--accent), var(--accent-cyan));
+  color: #fff;
+}
+
 .msg-hover-actions {
   display: flex;
   align-items: center;

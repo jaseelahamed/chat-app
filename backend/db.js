@@ -12,6 +12,25 @@ const userSchema = new mongoose.Schema(
   { timestamps: true }
 );
 
+const attachmentSchema = new mongoose.Schema(
+  {
+    name: { type: String },
+    type: { type: String },
+    size: { type: Number },
+    dataUrl: { type: String }
+  },
+  { _id: false }
+);
+
+const replyToSchema = new mongoose.Schema(
+  {
+    id: { type: String },
+    senderName: { type: String },
+    text: { type: String }
+  },
+  { _id: false }
+);
+
 const messageSchema = new mongoose.Schema(
   {
     id: { type: String, required: true, unique: true, index: true },
@@ -25,17 +44,8 @@ const messageSchema = new mongoose.Schema(
     senderAvatar: { type: String },
     senderColor: { type: String },
     text: { type: String, default: '' },
-    attachment: {
-      name: String,
-      type: String,
-      size: Number,
-      dataUrl: String
-    },
-    replyTo: {
-      id: String,
-      senderName: String,
-      text: String
-    },
+    attachment: { type: attachmentSchema, default: null },
+    replyTo: { type: replyToSchema, default: null },
     reactions: { type: mongoose.Schema.Types.Mixed, default: {} },
     createdAt: { type: Number, required: true, index: true }
   },

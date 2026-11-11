@@ -176,6 +176,12 @@ const dom = {
   btnEmoji: document.getElementById('btn-emoji'),
   fileInput: document.getElementById('file-input'),
   btnAttach: document.getElementById('btn-attach'),
+  composerBar: document.getElementById('composer-bar'),
+  voiceRecordingBar: document.getElementById('voice-recording-bar'),
+  voiceRecTimer: document.getElementById('voice-rec-timer'),
+  btnVoiceNote: document.getElementById('btn-voice-note'),
+  btnVoiceCancel: document.getElementById('btn-voice-cancel'),
+  btnVoiceSend: document.getElementById('btn-voice-send'),
   messageInput: document.getElementById('message-input'),
   btnSend: document.getElementById('btn-send'),
 
@@ -664,10 +670,17 @@ function refreshMessages() {
     emptyTitle,
     emptySubtitle,
     onReply: (msg) => {
+      const attachFallback = msg.attachment
+        ? String(msg.attachment.type || '').startsWith('audio/')
+          ? '🎤 Voice message'
+          : String(msg.attachment.type || '').startsWith('image/')
+          ? '📷 Photo'
+          : msg.attachment.name || 'Attachment'
+        : '';
       state.replyTo = {
         id: msg.id,
         senderName: msg.senderId === state.me.id ? 'You' : msg.senderName,
-        text: msg.text || (msg.attachment ? msg.attachment.name : '')
+        text: msg.text || attachFallback
       };
       renderComposerPreview();
       dom.messageInput.focus();
@@ -803,12 +816,62 @@ dom.messageInput.addEventListener('keydown', (e) => {
 
 dom.btnSend.addEventListener('click', sendMessage);
 
+function compressImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(objectUrl);
+      const maxDim = 1600;
+      let { width, height } = img;
+      if (width > maxDim || height > maxDim) {
+        const scale = Math.min(maxDim / width, maxDim / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL('image/jpeg', 0.82);
+      resolve({
+        name: file.name.replace(/\.[^.]+$/, '') + '.jpg',
+        type: 'image/jpeg',
+        size: Math.round((dataUrl.length * 3) / 4),
+        dataUrl
+      });
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(objectUrl);
+      reject(new Error('Could not process image.'));
+    };
+    img.src = objectUrl;
+  });
+}
+
 // Attachments
 dom.btnAttach.addEventListener('click', () => dom.fileInput.click());
-dom.fileInput.addEventListener('change', () => {
+dom.fileInput.addEventListener('change', async () => {
   const file = dom.fileInput.files?.[0];
   dom.fileInput.value = '';
   if (!file) return;
+
+  if (file.type && file.type.startsWith('image/') && file.size > 2 * 1024 * 1024) {
+    try {
+      const compressed = await compressImageFile(file);
+      if (compressed.dataUrl.length > 4.2 * 1024 * 1024) {
+        showToast('Photo is still too large after compression. Try a smaller image.', 'error');
+        return;
+      }
+      state.pendingAttachment = compressed;
+      state.replyTo = null;
+      renderComposerPreview();
+    } catch (err) {
+      showToast(err.message || 'Could not attach photo.', 'error');
+    }
+    return;
+  }
 
   if (file.size > 3 * 1024 * 1024) {
     showToast('Please select a file smaller than 3 MB.', 'error');
@@ -827,6 +890,131 @@ dom.fileInput.addEventListener('change', () => {
     renderComposerPreview();
   };
   reader.readAsDataURL(file);
+});
+
+// Voice Messages
+let voiceRecorder = null;
+let voiceStream = null;
+let voiceChunks = [];
+let voiceTimerInterval = null;
+let voiceStartedAt = 0;
+let shouldSendVoice = false;
+
+function resetVoiceRecorderUI() {
+  if (voiceTimerInterval) {
+    clearInterval(voiceTimerInterval);
+    voiceTimerInterval = null;
+  }
+  if (voiceStream) {
+    voiceStream.getTracks().forEach((t) => t.stop());
+    voiceStream = null;
+  }
+  voiceRecorder = null;
+  voiceChunks = [];
+  dom.voiceRecTimer.textContent = '00:00';
+  dom.voiceRecordingBar.classList.add('hidden');
+  dom.composerBar.classList.remove('hidden');
+}
+
+dom.btnVoiceNote.addEventListener('click', async () => {
+  if (voiceRecorder) return;
+  if (!navigator.mediaDevices?.getUserMedia || typeof window.MediaRecorder !== 'function') {
+    showToast('Voice recording is not supported in this browser.', 'error');
+    return;
+  }
+
+  try {
+    voiceStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const mimeCandidates = [
+      'audio/webm;codecs=opus',
+      'audio/webm',
+      'audio/mp4',
+      'audio/ogg;codecs=opus'
+    ];
+    const mimeType = mimeCandidates.find((m) => MediaRecorder.isTypeSupported(m)) || '';
+    voiceRecorder = mimeType
+      ? new MediaRecorder(voiceStream, { mimeType })
+      : new MediaRecorder(voiceStream);
+    voiceChunks = [];
+    shouldSendVoice = false;
+
+    voiceRecorder.ondataavailable = (e) => {
+      if (e.data && e.data.size > 0) {
+        voiceChunks.push(e.data);
+      }
+    };
+
+    voiceRecorder.onstop = () => {
+      const sendNow = shouldSendVoice;
+      const recordedType = voiceRecorder?.mimeType || mimeType || 'audio/webm';
+      const chunks = [...voiceChunks];
+      resetVoiceRecorderUI();
+
+      if (!sendNow || chunks.length === 0) return;
+
+      const blob = new Blob(chunks, { type: recordedType });
+      if (blob.size > 3 * 1024 * 1024) {
+        showToast('Voice message is too long (max ~3 MB).', 'error');
+        return;
+      }
+
+      const ext = recordedType.includes('mp4') ? 'm4a' : recordedType.includes('ogg') ? 'ogg' : 'webm';
+      const reader = new FileReader();
+      reader.onload = () => {
+        socket.emit('message:send', {
+          targetType: state.activeTarget.type,
+          targetId: state.activeTarget.id,
+          text: '',
+          attachment: {
+            name: `voice-message.${ext}`,
+            type: recordedType.split(';')[0],
+            size: blob.size,
+            dataUrl: reader.result
+          },
+          replyTo: state.replyTo
+        });
+        state.replyTo = null;
+        renderComposerPreview();
+      };
+      reader.readAsDataURL(blob);
+    };
+
+    voiceRecorder.start(250);
+    voiceStartedAt = Date.now();
+    dom.composerBar.classList.add('hidden');
+    dom.voiceRecordingBar.classList.remove('hidden');
+
+    voiceTimerInterval = setInterval(() => {
+      const sec = Math.floor((Date.now() - voiceStartedAt) / 1000);
+      const mins = String(Math.floor(sec / 60)).padStart(2, '0');
+      const rem = String(sec % 60).padStart(2, '0');
+      dom.voiceRecTimer.textContent = `${mins}:${rem}`;
+      if (sec >= 120 && voiceRecorder && voiceRecorder.state === 'recording') {
+        shouldSendVoice = true;
+        voiceRecorder.stop();
+      }
+    }, 500);
+  } catch (err) {
+    console.error('Voice note error:', err);
+    resetVoiceRecorderUI();
+    showToast('Please allow microphone access to send voice messages.', 'error');
+  }
+});
+
+dom.btnVoiceCancel.addEventListener('click', () => {
+  shouldSendVoice = false;
+  if (voiceRecorder && voiceRecorder.state !== 'inactive') {
+    voiceRecorder.stop();
+  } else {
+    resetVoiceRecorderUI();
+  }
+});
+
+dom.btnVoiceSend.addEventListener('click', () => {
+  shouldSendVoice = true;
+  if (voiceRecorder && voiceRecorder.state !== 'inactive') {
+    voiceRecorder.stop();
+  }
 });
 
 // Emoji Popover
