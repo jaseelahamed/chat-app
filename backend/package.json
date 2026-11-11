@@ -8,6 +8,8 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "agora-token": "^2.0.7",
+    "dotenv": "^18.0.10",
     "express": "^4.21.2",
     "socket.io": "^4.8.1"
   },

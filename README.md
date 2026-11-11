@@ -69,6 +69,9 @@ A real-time communication web app separated cleanly into `backend/` and `fronten
    - **Build Command:** `npm install`
    - **Start Command:** `npm start`
    - **Health Check Path:** `/health`
+   - In **Environment**, add:
+     - `AGORA_APP_ID` = your Agora App ID
+     - `AGORA_APP_CERTIFICATE` = your Agora App Certificate
    - Copy the deployed Render URL (e.g. `https://pulse-connect-backend.onrender.com`).
 3. **Deploy Frontend on Netlify** (uses [`netlify.toml`](netlify.toml)):
    - Create a **New site from Git** connected to the same GitHub repo.

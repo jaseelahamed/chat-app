@@ -1,7 +1,13 @@
+require('dotenv').config();
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
+const { RtcTokenBuilder, RtcRole } = require('agora-token');
+
+const AGORA_APP_ID = (process.env.AGORA_APP_ID || '').trim();
+const AGORA_APP_CERTIFICATE = (process.env.AGORA_APP_CERTIFICATE || '').trim();
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
@@ -21,10 +27,66 @@ const PORT = process.env.PORT || 5000;
 const HOST = process.env.HOST || '0.0.0.0';
 const FRONTEND_DIR = path.join(__dirname, '..', 'frontend');
 
+app.use((req, res, next) => {
+  const reqOrigin = req.headers.origin;
+  if (CORS_ORIGIN === '*') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+  } else if (reqOrigin && CORS_ORIGIN.includes(reqOrigin)) {
+    res.setHeader('Access-Control-Allow-Origin', reqOrigin);
+  }
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 app.use(express.static(FRONTEND_DIR));
 
 app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', onlineUsers: usersById.size });
+  res.json({
+    status: 'ok',
+    onlineUsers: usersById.size,
+    agoraConfigured: Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE)
+  });
+});
+
+app.get('/agora/token', (req, res) => {
+  if (!AGORA_APP_ID || !AGORA_APP_CERTIFICATE) {
+    return res.status(500).json({
+      error: 'AGORA_APP_ID and AGORA_APP_CERTIFICATE must be set on the backend.'
+    });
+  }
+
+  const rawChannel = String(req.query.channel || '').trim();
+  if (!rawChannel || rawChannel.length > 64 || !/^[a-zA-Z0-9_-]+$/.test(rawChannel)) {
+    return res.status(400).json({ error: 'Invalid or missing channel name.' });
+  }
+
+  const parsedUid = Number(req.query.uid);
+  const uid =
+    Number.isInteger(parsedUid) && parsedUid > 0 && parsedUid <= 2147483647
+      ? parsedUid
+      : Math.floor(1 + Math.random() * 2147483646);
+
+  const expireSeconds = 3600;
+  const token = RtcTokenBuilder.buildTokenWithUid(
+    AGORA_APP_ID,
+    AGORA_APP_CERTIFICATE,
+    rawChannel,
+    uid,
+    RtcRole.PUBLISHER,
+    expireSeconds,
+    expireSeconds
+  );
+
+  res.json({
+    appId: AGORA_APP_ID,
+    channel: rawChannel,
+    uid,
+    token
+  });
 });
 
 // Default public channels
@@ -44,6 +106,11 @@ const activeCalls = new Map();     // dmRoomId -> { callType, callerId, calleeId
 
 function getDmRoomId(userA, userB) {
   return `dm:${[userA, userB].sort().join(':')}`;
+}
+
+function getAgoraChannelName(userA, userB) {
+  const hash = crypto.createHash('sha256').update(getDmRoomId(userA, userB)).digest('hex').slice(0, 20);
+  return `pulse-${hash}-${Date.now().toString(36)}`;
 }
 
 function appendMessage(roomId, msg) {
@@ -354,7 +421,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- WebRTC Call Signaling --------------------
+  // -------------------- Agora Call Signaling --------------------
 
   socket.on('call:request', ({ to, callType }) => {
     const callerId = userIdBySocket.get(socket.id);
@@ -375,10 +442,12 @@ io.on('connection', (socket) => {
 
     const normalizedType = callType === 'video' ? 'video' : 'audio';
     const roomId = getDmRoomId(caller.id, callee.id);
+    const channel = getAgoraChannelName(caller.id, callee.id);
     activeCalls.set(roomId, {
       callType: normalizedType,
       callerId: caller.id,
       calleeId: callee.id,
+      channel,
       connectedAt: null
     });
 
@@ -396,7 +465,8 @@ io.on('connection', (socket) => {
         avatar: caller.avatar,
         color: caller.color
       },
-      callType: normalizedType
+      callType: normalizedType,
+      channel
     });
   });
 
@@ -411,7 +481,10 @@ io.on('connection', (socket) => {
       session.connectedAt = Date.now();
     }
 
-    io.to(caller.socketId).emit('call:accepted', { from: calleeId });
+    io.to(caller.socketId).emit('call:accepted', {
+      from: calleeId,
+      channel: session?.channel || getAgoraChannelName(calleeId, caller.id)
+    });
   });
 
   socket.on('call:reject', ({ to, reason }) => {
@@ -469,27 +542,6 @@ io.on('connection', (socket) => {
       camEnabled,
       screenSharing
     });
-  });
-
-  socket.on('webrtc:offer', ({ to, sdp }) => {
-    const from = userIdBySocket.get(socket.id);
-    const peer = usersById.get(to);
-    if (!from || !peer) return;
-    io.to(peer.socketId).emit('webrtc:offer', { from, sdp });
-  });
-
-  socket.on('webrtc:answer', ({ to, sdp }) => {
-    const from = userIdBySocket.get(socket.id);
-    const peer = usersById.get(to);
-    if (!from || !peer) return;
-    io.to(peer.socketId).emit('webrtc:answer', { from, sdp });
-  });
-
-  socket.on('webrtc:ice-candidate', ({ to, candidate }) => {
-    const from = userIdBySocket.get(socket.id);
-    const peer = usersById.get(to);
-    if (!from || !peer) return;
-    io.to(peer.socketId).emit('webrtc:ice-candidate', { from, candidate });
   });
 
   // Clean up on disconnect
