@@ -1,0 +1,13 @@
+{
+  "name": "pulse-connect",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pulse real-time messaging, voice calling, and video calling project organized into backend/ and frontend/ folders.",
+  "scripts": {
+    "postinstall": "npm --prefix backend install",
+    "start": "node start.js",
+    "dev": "node start.js --watch",
+    "start:backend": "npm --prefix backend start",
+    "start:frontend": "npm --prefix frontend start"
+  }
+}
