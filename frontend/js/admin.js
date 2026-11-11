@@ -435,9 +435,12 @@ async function loadPricing() {
             <td>${esc(p.salesCount || 0)} (₹${esc(p.totalRevenueInr || 0)})</td>
             <td><span class="pill ${p.isActive ? 'ok' : 'bad'}">${p.isActive ? 'Active' : 'Inactive'}</span></td>
             <td>
-              <button class="btn sm ghost" data-pkg-toggle="${esc(p.packageId)}" data-active="${!p.isActive}">
-                ${p.isActive ? 'Deactivate' : 'Activate'}
-              </button>
+              <div class="actions-row">
+                <button class="btn sm ghost" data-pkg-toggle="${esc(p.packageId)}" data-active="${!p.isActive}">
+                  ${p.isActive ? 'Deactivate' : 'Activate'}
+                </button>
+                <button class="btn sm danger" data-pkg-delete="${esc(p.packageId)}">Delete</button>
+              </div>
             </td>
           </tr>`
           )
@@ -453,6 +456,15 @@ async function loadPricing() {
         body: JSON.stringify({ isActive: btn.dataset.active === 'true' })
       });
       showToast('Package updated.');
+      loadPricing();
+    })
+  );
+
+  wrap.querySelectorAll('[data-pkg-delete]').forEach((btn) =>
+    btn.addEventListener('click', async () => {
+      if (!confirm('Delete this coin package?')) return;
+      await api(`/admin/packages/${btn.dataset.pkgDelete}`, { method: 'DELETE' });
+      showToast('Package deleted.');
       loadPricing();
     })
   );

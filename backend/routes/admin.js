@@ -353,6 +353,18 @@ function createAdminRouter({ onlineUsersById, onPresenceChanged, onCoinsUpdated,
     res.json({ package: updated });
   });
 
+  router.delete('/packages/:packageId', requirePermission('finance'), async (req, res) => {
+    const deleted = await CoinPackage.deleteOne({ packageId: req.params.packageId });
+    if (!deleted.deletedCount) return res.status(404).json({ error: 'Package not found.' });
+    await writeAuditLog({
+      actorId: req.user.userId,
+      actorRole: 'admin',
+      action: 'package_delete',
+      targetId: req.params.packageId
+    });
+    res.json({ deleted: true });
+  });
+
   // Service Pricing, Commissions & Platform Settings
   router.get('/settings', requirePermission('settings'), async (_req, res) => {
     const settings = await getPlatformSettings();

@@ -7,6 +7,7 @@ const {
   CallSession
 } = require('../db');
 const {
+  authenticateToken,
   requireAuth,
   requireRole,
   requireApprovedExecutive
@@ -53,8 +54,26 @@ function getDateRangeBounds(range, fromParam, toParam) {
 function createExecutiveRouter({ onlineUsersById, onPresenceChanged }) {
   const router = express.Router();
 
-  // Customer Discovery: list approved active executives
+  // Customer Discovery: list approved active executives (requires customer coin/package purchase)
   router.get('/executives', async (req, res) => {
+    const authHeader = String(req.headers.authorization || '');
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+    const auth = await authenticateToken(token);
+    if (!auth) {
+      return res.status(401).json({ error: 'Please log in to view executives.' });
+    }
+    if (
+      auth.user.role === 'customer' &&
+      (auth.user.totalCoinsPurchased || 0) <= 0 &&
+      (auth.user.coinBalance || 0) <= 0
+    ) {
+      return res.json({
+        executives: [],
+        locked: true,
+        message: 'Purchase a coin package to view and connect with executives.'
+      });
+    }
+
     const q = String(req.query.q || '').trim().toLowerCase();
     const category = String(req.query.category || '').trim();
     const availabilityFilter = String(req.query.availability || '').trim().toLowerCase();

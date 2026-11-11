@@ -151,19 +151,48 @@ async function buildAllUsersList() {
   return list;
 }
 
+function canCustomerSeeExecutives(userObj) {
+  if (!userObj || userObj.role !== 'customer') return true;
+  return (userObj.totalCoinsPurchased || 0) > 0 || (userObj.coinBalance || 0) > 0;
+}
+
+function filterUsersForViewer(viewer, allUsers) {
+  const showExecs = canCustomerSeeExecutives(viewer);
+  return allUsers.filter((u) => {
+    if (u.role === 'executive') {
+      if (u.approvalStatus !== 'approved') return false;
+      if (!showExecs) return false;
+    }
+    return true;
+  });
+}
+
 async function broadcastPresence() {
   try {
-    const users = await buildAllUsersList();
-    io.emit('presence:update', users);
+    const allUsers = await buildAllUsersList();
+    for (const onlineUser of onlineUsersById.values()) {
+      io.to(onlineUser.socketId).emit('presence:update', filterUsersForViewer(onlineUser, allUsers));
+    }
   } catch (err) {
     console.error('broadcastPresence failed:', err.message);
   }
 }
 
-function emitCoinsToUser(userId, coinBalance) {
+async function emitCoinsToUser(userId, coinBalance, totalCoinsPurchased) {
   const online = onlineUsersById.get(userId);
   if (online) {
-    io.to(online.socketId).emit('wallet:update', { coinBalance });
+    const prevUnlocked = canCustomerSeeExecutives(online);
+    online.coinBalance = coinBalance;
+    if (typeof totalCoinsPurchased === 'number') {
+      online.totalCoinsPurchased = totalCoinsPurchased;
+    }
+    io.to(online.socketId).emit('wallet:update', {
+      coinBalance,
+      ...(typeof totalCoinsPurchased === 'number' ? { totalCoinsPurchased } : {})
+    });
+    if (!prevUnlocked && canCustomerSeeExecutives(online)) {
+      await broadcastPresence();
+    }
   }
 }
 
@@ -567,6 +596,8 @@ io.on('connection', (socket) => {
         username: userDoc.username || '',
         avatar: userDoc.avatar,
         color: userDoc.color,
+        coinBalance: userDoc.coinBalance || 0,
+        totalCoinsPurchased: userDoc.totalCoinsPurchased || 0,
         status: existing?.peerId ? 'in-call' : 'online',
         socketId: socket.id,
         peerId: existing?.peerId || null
@@ -579,7 +610,7 @@ io.on('connection', (socket) => {
         socket.join(ch.id);
       }
 
-      const [users, history, settings] = await Promise.all([
+      const [allUsers, history, settings] = await Promise.all([
         buildAllUsersList(),
         loadUserChatHistory(user.id),
         getPlatformSettings()
@@ -596,11 +627,12 @@ io.on('connection', (socket) => {
           status: user.status,
           coinBalance: userDoc.coinBalance || 0,
           bonusCoinBalance: userDoc.bonusCoinBalance || 0,
+          totalCoinsPurchased: userDoc.totalCoinsPurchased || 0,
           approvalStatus: userDoc.approvalStatus || 'approved',
           earnings: userDoc.earnings || {}
         },
         channels: DEFAULT_CHANNELS,
-        users,
+        users: filterUsersForViewer(user, allUsers),
         history,
         pricing: {
           chatCoinPerMessage: settings.chatCoinPerMessage,
@@ -775,6 +807,14 @@ io.on('connection', (socket) => {
 
           if (executiveDoc.approvalStatus !== 'approved') {
             socket.emit('message:error', { error: 'Executive account is awaiting Admin approval.' });
+            return;
+          }
+
+          if (!canCustomerSeeExecutives(customerDoc)) {
+            socket.emit('message:error', {
+              error: 'Purchase a coin package first to message executives.',
+              code: 'insufficient_balance'
+            });
             return;
           }
 
@@ -1033,6 +1073,13 @@ io.on('connection', (socket) => {
 
         if (execDoc.approvalStatus !== 'approved') {
           socket.emit('call:unavailable', { to, reason: 'Executive is not approved yet.' });
+          return;
+        }
+        if (!canCustomerSeeExecutives(custDoc)) {
+          socket.emit('call:unavailable', {
+            to,
+            reason: 'Purchase a coin package first to call executives.'
+          });
           return;
         }
         if (normalizedType === 'audio' && execDoc.availability?.audioEnabled === false) {

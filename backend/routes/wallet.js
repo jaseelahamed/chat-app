@@ -198,7 +198,11 @@ function createWalletRouter({ onCoinsUpdated }) {
         return res.status(400).json({ error: creditResult.error });
       }
 
-      onCoinsUpdated?.(req.user.userId, creditResult.coinBalance);
+      onCoinsUpdated?.(
+        req.user.userId,
+        creditResult.coinBalance,
+        (req.user.totalCoinsPurchased || 0) + (creditResult.order?.coins || 0)
+      );
       res.json({
         success: true,
         duplicate: Boolean(creditResult.duplicate),

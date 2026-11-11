@@ -60,6 +60,7 @@ async function authenticateToken(token) {
   const user = await User.findOne({ userId: claims.userId }, { passwordHash: 0 }).lean();
   if (!user) return null;
   if (user.accountStatus !== 'active') return null;
+  if (user.role === 'executive' && user.approvalStatus !== 'approved') return null;
   if (typeof claims.tokenVersion === 'number' && user.tokenVersion !== claims.tokenVersion) {
     return null;
   }

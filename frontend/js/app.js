@@ -527,6 +527,14 @@ dom.authForm.addEventListener('submit', async (e) => {
       throw new Error(data.error || 'Authentication failed.');
     }
 
+    if (data.pendingApproval || !data.token) {
+      dom.passwordInput.value = '';
+      setAuthMode('login');
+      showAuthError(data.message || 'Registration submitted! You can log in after Admin approves your account.');
+      showToast(data.message || 'Pending Admin approval.', 'info');
+      return;
+    }
+
     if (data.message) showToast(data.message, 'info');
     saveStoredToken(data.token);
     dom.passwordInput.value = '';
@@ -710,10 +718,14 @@ socket.on('session:ready', ({ user, channels, users, history, pricing }) => {
   refreshAllViews();
 });
 
-socket.on('wallet:update', ({ coinBalance }) => {
+socket.on('wallet:update', ({ coinBalance, totalCoinsPurchased }) => {
   if (!state.me) return;
   state.me.coinBalance = coinBalance;
+  if (typeof totalCoinsPurchased === 'number') {
+    state.me.totalCoinsPurchased = totalCoinsPurchased;
+  }
   updateRoleUI();
+  refreshSidebar();
 });
 
 socket.on('message:error', ({ error, code }) => {
@@ -866,6 +878,16 @@ function refreshSidebar() {
     onSelectUser: selectDmPeer,
     onCallUser: startCallWithPeer
   });
+
+  if (
+    state.me.role === 'customer' &&
+    (state.me.totalCoinsPurchased || 0) <= 0 &&
+    (state.me.coinBalance || 0) <= 0
+  ) {
+    dom.noPeersHint.classList.remove('hidden');
+    dom.noPeersHint.innerHTML =
+      '<p>🔒 Executives Locked</p><span>Purchase a coin package in <strong>Wallet &amp; Top Up</strong> above to view and connect with executives.</span>';
+  }
 }
 
 function refreshHeader() {
@@ -1423,6 +1445,15 @@ async function loadWalletPackages() {
   }
 }
 
+function applyVerifiedPurchase(verified) {
+  state.me.coinBalance = verified.coinBalance;
+  state.me.bonusCoinBalance = verified.bonusCoinBalance;
+  state.me.totalCoinsPurchased = (state.me.totalCoinsPurchased || 0) + (verified.order?.coins || 1);
+  updateRoleUI();
+  refreshSidebar();
+  dom.walletSummarySub.textContent = `Available: ${verified.coinBalance} Coins (Bonus: ${verified.bonusCoinBalance})`;
+}
+
 async function purchasePackage(pkg, paymentMode) {
   try {
     const data = await apiRequest('/wallet/recharge/create-order', {
@@ -1453,10 +1484,7 @@ async function purchasePackage(pkg, paymentMode) {
               razorpay_signature: resp.razorpay_signature
             })
           });
-          state.me.coinBalance = verified.coinBalance;
-          state.me.bonusCoinBalance = verified.bonusCoinBalance;
-          updateRoleUI();
-          dom.walletSummarySub.textContent = `Available: ${verified.coinBalance} Coins (Bonus: ${verified.bonusCoinBalance})`;
+          applyVerifiedPurchase(verified);
           showToast('Coins credited successfully!', 'success');
         }
       });
@@ -1474,10 +1502,7 @@ async function purchasePackage(pkg, paymentMode) {
         simulateStatus: ok ? '' : 'cancelled'
       })
     });
-    state.me.coinBalance = verified.coinBalance;
-    state.me.bonusCoinBalance = verified.bonusCoinBalance;
-    updateRoleUI();
-    dom.walletSummarySub.textContent = `Available: ${verified.coinBalance} Coins (Bonus: ${verified.bonusCoinBalance})`;
+    applyVerifiedPurchase(verified);
     showToast('Coins credited!', 'success');
   } catch (err) {
     showToast(err.message, 'error');

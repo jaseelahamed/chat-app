@@ -212,13 +212,10 @@ function createAuthRouter({ onPresenceChanged }) {
         documents
       });
 
-      const { token, sessionEntry } = createSessionAndToken(userDoc, req);
-      await User.updateOne({ userId: userDoc.userId }, { $push: { sessions: { $each: [sessionEntry], $slice: -10 } } });
-
       res.status(201).json({
-        token,
+        pendingApproval: true,
         user: formatPublicSelf(userDoc),
-        message: 'Registration submitted. Your account is pending Admin approval.'
+        message: 'Registration submitted! You can log in once Admin approves your account.'
       });
     } catch (err) {
       if (err.code === 11000) {
@@ -317,6 +314,13 @@ function createAuthRouter({ onPresenceChanged }) {
       }
       if (userDoc.accountStatus !== 'active') {
         return res.status(403).json({ error: `Account is ${userDoc.accountStatus}. Contact support.` });
+      }
+      if (userDoc.role === 'executive' && userDoc.approvalStatus !== 'approved') {
+        const msg =
+          userDoc.approvalStatus === 'rejected'
+            ? `Your executive application was rejected.${userDoc.approvalNote ? ` Reason: ${userDoc.approvalNote}` : ''}`
+            : 'Your executive account is pending Admin approval. You can log in after Admin approves it.';
+        return res.status(403).json({ error: msg });
       }
 
       const { token, sessionEntry } = createSessionAndToken(userDoc, req);
