@@ -1,7 +1,6 @@
 [build]
   publish = "frontend"
-  command = "node -e \"if (process.env.BACKEND_URL) { require('fs').writeFileSync('frontend/config.js', 'window.PULSE_BACKEND_URL = ' + JSON.stringify(process.env.BACKEND_URL.trim()) + ';\\n'); }\""
+  command = "node frontend/generate-icons.js && node -e \"if (process.env.BACKEND_URL) { require('fs').writeFileSync('frontend/config.js', 'window.PULSE_BACKEND_URL = ' + JSON.stringify(process.env.BACKEND_URL.trim()) + ';\\n'); }\""
 
 [build.environment]
   NPM_FLAGS = "--ignore-scripts"
-

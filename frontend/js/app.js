@@ -899,3 +899,12 @@ dom.lightbox.addEventListener('click', (e) => {
   }
 });
 
+// PWA Service Worker registration
+if ('serviceWorker' in navigator && window.location.protocol !== 'file:') {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js').catch((err) => {
+      console.warn('Service worker registration failed:', err);
+    });
+  });
+}
+

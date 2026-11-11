@@ -1,10 +1,18 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const { ensureIcons } = require('./generate-icons');
 
 const PORT = process.env.PORT || 5173;
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT_DIR = __dirname;
+
+if (
+  !fs.existsSync(path.join(ROOT_DIR, 'icons', 'icon-192.png')) ||
+  !fs.existsSync(path.join(ROOT_DIR, 'icons', 'icon-512.png'))
+) {
+  ensureIcons();
+}
 
 const MIME_TYPES = {
   '.html': 'text/html; charset=utf-8',
@@ -12,6 +20,7 @@ const MIME_TYPES = {
   '.js': 'application/javascript; charset=utf-8',
   '.mjs': 'application/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json; charset=utf-8',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.jpg': 'image/jpeg',
@@ -22,7 +31,7 @@ const MIME_TYPES = {
   '.woff2': 'font/woff2'
 };
 
-const BLOCKED_FILES = new Set(['/server.js', '/package.json', '/package-lock.json']);
+const BLOCKED_FILES = new Set(['/server.js', '/generate-icons.js', '/package.json', '/package-lock.json']);
 
 const server = http.createServer((req, res) => {
   const urlPath = (req.url || '/').split('?')[0];
