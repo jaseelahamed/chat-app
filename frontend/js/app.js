@@ -30,44 +30,72 @@ function loadScript(src) {
 
 const DEFAULT_BACKEND_PORT = '5000';
 
+function isLocalHostname(hostname) {
+  return (
+    !hostname ||
+    hostname === 'localhost' ||
+    hostname === '127.0.0.1' ||
+    /^192\.168\./.test(hostname) ||
+    /^10\./.test(hostname)
+  );
+}
+
 function resolveBackendOrigin() {
   const paramBackend = new URLSearchParams(window.location.search).get('backend');
   if (paramBackend) {
     return paramBackend.replace(/\/+$/, '');
   }
+  const proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
+  const host = window.location.hostname || 'localhost';
+  if (isLocalHostname(host)) {
+    return `${proto}//${host}:${DEFAULT_BACKEND_PORT}`;
+  }
   if (typeof window.PULSE_BACKEND_URL === 'string' && window.PULSE_BACKEND_URL.trim()) {
     return window.PULSE_BACKEND_URL.trim().replace(/\/+$/, '');
   }
-  const proto = window.location.protocol === 'https:' ? 'https:' : 'http:';
-  const host = window.location.hostname || 'localhost';
   return `${proto}//${host}:${DEFAULT_BACKEND_PORT}`;
 }
 
-// Connects same-origin when served by the backend, or directly to the separate backend port (default :5000)
-async function connectSocket() {
-  if (typeof window.io === 'function') {
-    return window.io();
+function hasConfiguredBackend() {
+  const paramBackend = new URLSearchParams(window.location.search).get('backend');
+  if (paramBackend) return true;
+  if (typeof window.PULSE_BACKEND_URL === 'string' && window.PULSE_BACKEND_URL.trim()) {
+    return true;
   }
+  return isLocalHostname(window.location.hostname);
+}
 
+// Connects same-origin when served by the backend, or directly to the separate backend origin
+async function connectSocket() {
   const backendOrigin = resolveBackendOrigin();
   const isFileOrigin = window.location.protocol === 'file:';
   const isSameAsBackend = !isFileOrigin && window.location.origin === backendOrigin;
 
-  if (isSameAsBackend) {
-    await loadScript('/socket.io/socket.io.js');
-    return window.io();
+  if (typeof window.io !== 'function') {
+    if (isSameAsBackend) {
+      await loadScript('/socket.io/socket.io.js');
+    } else {
+      await loadScript(`${backendOrigin}/socket.io/socket.io.js`);
+    }
   }
 
-  await loadScript(`${backendOrigin}/socket.io/socket.io.js`);
-  return window.io(backendOrigin);
+  return isSameAsBackend ? window.io() : window.io(backendOrigin);
 }
 
-let socket;
+const backendOrigin = resolveBackendOrigin();
+let socket = null;
 try {
   socket = await connectSocket();
 } catch (err) {
-  showToast(`Backend server not reachable at ${resolveBackendOrigin()}. Start backend/server.js first.`, 'error');
-  throw err;
+  console.error('Socket initialization failed:', err);
+  showToast(`Backend server not reachable at ${backendOrigin}.`, 'error');
+}
+
+if (!hasConfiguredBackend()) {
+  showToast(
+    'Backend URL is not configured in config.js. Set BACKEND_URL in Netlify env vars and redeploy.',
+    'error'
+  );
 }
 
 const state = {
@@ -203,6 +231,14 @@ function getOrCreateClientId() {
 
 function joinWithProfile(profile) {
   sessionStorage.setItem('pulse_profile', JSON.stringify(profile));
+  if (!socket) {
+    showToast(`Cannot join: backend unavailable at ${backendOrigin}.`, 'error');
+    return;
+  }
+  if (!socket.connected) {
+    showToast(`Connecting to ${backendOrigin}... (free Render servers take ~30s to wake up)`, 'info');
+    return;
+  }
   socket.emit('user:join', profile);
 }
 
@@ -249,22 +285,34 @@ dom.btnCloseAuth.addEventListener('click', () => {
   }
 });
 
-socket.on('connect', () => {
-  const existing = sessionStorage.getItem('pulse_profile');
-  if (existing) {
-    try {
-      socket.emit('user:join', JSON.parse(existing));
-    } catch {
-      // Ignore
+let hasShownConnectError = false;
+if (socket) {
+  socket.on('connect', () => {
+    hasShownConnectError = false;
+    const existing = sessionStorage.getItem('pulse_profile');
+    if (existing) {
+      try {
+        socket.emit('user:join', JSON.parse(existing));
+      } catch {
+        // Ignore
+      }
     }
-  }
-});
+  });
 
-socket.on('disconnect', () => {
-  if (state.me) {
-    showToast('Connection lost — attempting to reconnect...', 'error');
-  }
-});
+  socket.on('connect_error', (err) => {
+    console.error('Socket connect_error:', err);
+    if (!hasShownConnectError) {
+      hasShownConnectError = true;
+      showToast(`Unable to reach backend at ${backendOrigin}.`, 'error');
+    }
+  });
+
+  socket.on('disconnect', () => {
+    if (state.me) {
+      showToast('Connection lost — attempting to reconnect...', 'error');
+    }
+  });
+}
 
 // ---------------- Socket Events ----------------
 socket.on('session:ready', ({ user, channels, users, history }) => {
