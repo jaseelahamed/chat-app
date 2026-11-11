@@ -70,6 +70,8 @@ A real-time communication web app separated cleanly into `backend/` and `fronten
    - **Start Command:** `npm start`
    - **Health Check Path:** `/health`
    - In **Environment**, add:
+     - `MONGODB_URI` = your MongoDB Atlas connection string (`mongodb+srv://...`)
+     - `AUTH_SECRET` = any random secret string for signing login tokens
      - `AGORA_APP_ID` = your Agora App ID
      - `AGORA_APP_CERTIFICATE` = your Agora App Certificate
    - Copy the deployed Render URL (e.g. `https://pulse-connect-backend.onrender.com`).

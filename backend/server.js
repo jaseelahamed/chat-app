@@ -5,9 +5,14 @@ const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
 const { RtcTokenBuilder, RtcRole } = require('agora-token');
+const { connectDatabase, isDatabaseReady, User, Message } = require('./db');
 
 const AGORA_APP_ID = (process.env.AGORA_APP_ID || '').trim();
 const AGORA_APP_CERTIFICATE = (process.env.AGORA_APP_CERTIFICATE || '').trim();
+const AUTH_SECRET =
+  (process.env.AUTH_SECRET || '').trim() ||
+  AGORA_APP_CERTIFICATE ||
+  'pulse-connect-auth-secret';
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
@@ -19,7 +24,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 5 * 1024 * 1024, // 5 MB max payload for inline image/file shares
   cors: {
     origin: CORS_ORIGIN,
-    methods: ['GET', 'POST']
+    methods: ['GET', 'POST', 'PUT']
   }
 });
 
@@ -34,22 +39,337 @@ app.use((req, res, next) => {
   } else if (reqOrigin && CORS_ORIGIN.includes(reqOrigin)) {
     res.setHeader('Access-Control-Allow-Origin', reqOrigin);
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
   }
   next();
 });
 
+app.use(express.json({ limit: '1mb' }));
 app.use(express.static(FRONTEND_DIR));
 
+// Default public channels
+const DEFAULT_CHANNELS = [
+  { id: 'channel:general', name: 'General', topic: 'Team-wide real-time chat & updates' },
+  { id: 'channel:lounge', name: 'Lounge', topic: 'Casual hangouts, memes & quick syncs' },
+  { id: 'channel:projects', name: 'Projects', topic: 'Collaborate on builds & brainstorms' }
+];
+
+const MAX_HISTORY_PER_ROOM = 100;
+
+// Live connection state keyed by userId
+const onlineUsersById = new Map(); // userId -> { id, name, username, avatar, color, status, socketId, peerId }
+const userIdBySocket = new Map();  // socketId -> userId
+const activeCalls = new Map();     // dmRoomId -> { callType, callerId, calleeId, channel, connectedAt }
+
+// ---------------- Auth Helpers ----------------
+function hashPassword(password) {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${derived}`;
+}
+
+function verifyPassword(password, storedHash) {
+  const [salt, expectedHex] = String(storedHash || '').split(':');
+  if (!salt || !expectedHex) return false;
+  const actualBuf = crypto.scryptSync(password, salt, 64);
+  const expectedBuf = Buffer.from(expectedHex, 'hex');
+  if (actualBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(actualBuf, expectedBuf);
+}
+
+function signAuthToken(payload) {
+  const body = {
+    ...payload,
+    exp: Date.now() + 30 * 24 * 60 * 60 * 1000
+  };
+  const encoded = Buffer.from(JSON.stringify(body)).toString('base64url');
+  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(encoded).digest('base64url');
+  return `${encoded}.${sig}`;
+}
+
+function verifyAuthToken(token) {
+  if (!token || typeof token !== 'string') return null;
+  const parts = token.split('.');
+  if (parts.length !== 2) return null;
+  const [encoded, sig] = parts;
+  const expectedSig = crypto.createHmac('sha256', AUTH_SECRET).update(encoded).digest('base64url');
+  const sigBuf = Buffer.from(sig);
+  const expectedBuf = Buffer.from(expectedSig);
+  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!parsed.userId || (parsed.exp && parsed.exp < Date.now())) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function serializeDbUser(doc, liveEntry) {
+  return {
+    id: doc.userId,
+    name: doc.name,
+    username: doc.username,
+    avatar: doc.avatar,
+    color: doc.color,
+    status: liveEntry ? liveEntry.status : 'offline'
+  };
+}
+
+async function buildAllUsersList() {
+  if (!isDatabaseReady()) {
+    return Array.from(onlineUsersById.values()).map((u) => ({
+      id: u.id,
+      name: u.name,
+      username: u.username,
+      avatar: u.avatar,
+      color: u.color,
+      status: u.status
+    }));
+  }
+
+  const dbUsers = await User.find({}, { passwordHash: 0 }).sort({ name: 1 }).lean();
+  const list = dbUsers.map((doc) => serializeDbUser(doc, onlineUsersById.get(doc.userId)));
+
+  // Sort online/in-call users before offline users
+  const rank = { 'in-call': 0, online: 1, offline: 2 };
+  list.sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2) || a.name.localeCompare(b.name));
+  return list;
+}
+
+async function broadcastPresence() {
+  try {
+    const users = await buildAllUsersList();
+    io.emit('presence:update', users);
+  } catch (err) {
+    console.error('broadcastPresence failed:', err.message);
+  }
+}
+
+function getDmRoomId(userA, userB) {
+  return `dm:${[userA, userB].sort().join(':')}`;
+}
+
+function getAgoraChannelName(userA, userB) {
+  const hash = crypto.createHash('sha256').update(getDmRoomId(userA, userB)).digest('hex').slice(0, 20);
+  return `pulse-${hash}-${Date.now().toString(36)}`;
+}
+
+function formatMessageDoc(doc) {
+  return {
+    id: doc.id,
+    roomId: doc.roomId,
+    type: doc.type || 'text',
+    callType: doc.callType,
+    senderId: doc.senderId,
+    senderName: doc.senderName,
+    senderAvatar: doc.senderAvatar,
+    senderColor: doc.senderColor,
+    text: doc.text || '',
+    attachment: doc.attachment && doc.attachment.dataUrl ? doc.attachment : null,
+    replyTo: doc.replyTo && doc.replyTo.id ? doc.replyTo : null,
+    reactions: doc.reactions || {},
+    createdAt: doc.createdAt
+  };
+}
+
+async function loadUserChatHistory(userId) {
+  const history = {};
+  for (const ch of DEFAULT_CHANNELS) {
+    history[ch.id] = [];
+  }
+
+  if (!isDatabaseReady()) return history;
+
+  // Load latest channel messages
+  await Promise.all(
+    DEFAULT_CHANNELS.map(async (ch) => {
+      const docs = await Message.find({ roomId: ch.id })
+        .sort({ createdAt: -1 })
+        .limit(MAX_HISTORY_PER_ROOM)
+        .lean();
+      history[ch.id] = docs.reverse().map(formatMessageDoc);
+    })
+  );
+
+  // Load all DM conversations involving this user
+  const dmDocs = await Message.find({ targetType: 'dm', participants: userId })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  for (const doc of dmDocs) {
+    if (!history[doc.roomId]) {
+      history[doc.roomId] = [];
+    }
+    const peerId = (doc.participants || []).find((p) => p !== userId) || '';
+    history[doc.roomId].push({
+      ...formatMessageDoc(doc),
+      dmPeerId: peerId
+    });
+  }
+
+  return history;
+}
+
+// ---------------- REST Endpoints ----------------
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
-    onlineUsers: usersById.size,
+    onlineUsers: onlineUsersById.size,
+    dbConnected: isDatabaseReady(),
     agoraConfigured: Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE)
   });
+});
+
+app.post('/auth/register', async (req, res) => {
+  if (!isDatabaseReady()) {
+    return res.status(503).json({ error: 'Database is not connected. Set MONGODB_URI on the backend.' });
+  }
+
+  try {
+    const name = String(req.body?.name || '').trim().slice(0, 32);
+    const rawUsername = String(req.body?.username || '').trim().toLowerCase();
+    const password = String(req.body?.password || '');
+    const avatar = String(req.body?.avatar || name[0]?.toUpperCase() || '⚡').slice(0, 8);
+    const color = String(req.body?.color || 'linear-gradient(135deg, #6366f1, #8b5cf6)').slice(0, 96);
+
+    if (!name) {
+      return res.status(400).json({ error: 'Please enter your name.' });
+    }
+    if (!/^[a-z0-9._-]{3,24}$/.test(rawUsername)) {
+      return res.status(400).json({
+        error: 'Username must be 3–24 characters using letters, numbers, ".", "_", or "-".'
+      });
+    }
+    if (password.length < 4) {
+      return res.status(400).json({ error: 'Password must be at least 4 characters.' });
+    }
+
+    const existing = await User.findOne({ username: rawUsername }).lean();
+    if (existing) {
+      return res.status(409).json({ error: 'Username is already taken.' });
+    }
+
+    const userDoc = await User.create({
+      userId: crypto.randomUUID(),
+      name,
+      username: rawUsername,
+      passwordHash: hashPassword(password),
+      avatar,
+      color
+    });
+
+    const user = {
+      id: userDoc.userId,
+      name: userDoc.name,
+      username: userDoc.username,
+      avatar: userDoc.avatar,
+      color: userDoc.color
+    };
+
+    const token = signAuthToken({ userId: user.id, username: user.username });
+    broadcastPresence();
+    res.status(201).json({ token, user });
+  } catch (err) {
+    if (err.code === 11000) {
+      return res.status(409).json({ error: 'Username is already taken.' });
+    }
+    console.error('Register error:', err);
+    res.status(500).json({ error: 'Could not register account.' });
+  }
+});
+
+app.post('/auth/login', async (req, res) => {
+  if (!isDatabaseReady()) {
+    return res.status(503).json({ error: 'Database is not connected. Set MONGODB_URI on the backend.' });
+  }
+
+  try {
+    const username = String(req.body?.username || '').trim().toLowerCase();
+    const password = String(req.body?.password || '');
+
+    if (!username || !password) {
+      return res.status(400).json({ error: 'Username and password are required.' });
+    }
+
+    const userDoc = await User.findOne({ username }).lean();
+    if (!userDoc || !verifyPassword(password, userDoc.passwordHash)) {
+      return res.status(401).json({ error: 'Invalid username or password.' });
+    }
+
+    const user = {
+      id: userDoc.userId,
+      name: userDoc.name,
+      username: userDoc.username,
+      avatar: userDoc.avatar,
+      color: userDoc.color
+    };
+    const token = signAuthToken({ userId: user.id, username: user.username });
+    res.json({ token, user });
+  } catch (err) {
+    console.error('Login error:', err);
+    res.status(500).json({ error: 'Could not log in.' });
+  }
+});
+
+app.put('/auth/profile', async (req, res) => {
+  if (!isDatabaseReady()) {
+    return res.status(503).json({ error: 'Database is not connected.' });
+  }
+
+  const authHeader = String(req.headers.authorization || '');
+  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
+  const claims = verifyAuthToken(token);
+  if (!claims) {
+    return res.status(401).json({ error: 'Unauthorized.' });
+  }
+
+  try {
+    const name = String(req.body?.name || '').trim().slice(0, 32);
+    const avatar = String(req.body?.avatar || '').slice(0, 8);
+    const color = String(req.body?.color || '').slice(0, 96);
+    if (!name) {
+      return res.status(400).json({ error: 'Name cannot be empty.' });
+    }
+
+    const updated = await User.findOneAndUpdate(
+      { userId: claims.userId },
+      { $set: { name, ...(avatar ? { avatar } : {}), ...(color ? { color } : {}) } },
+      { new: true }
+    ).lean();
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Account not found.' });
+    }
+
+    const live = onlineUsersById.get(updated.userId);
+    if (live) {
+      live.name = updated.name;
+      live.avatar = updated.avatar;
+      live.color = updated.color;
+    }
+
+    await broadcastPresence();
+    res.json({
+      user: {
+        id: updated.userId,
+        name: updated.name,
+        username: updated.username,
+        avatar: updated.avatar,
+        color: updated.color
+      }
+    });
+  } catch (err) {
+    console.error('Profile update error:', err);
+    res.status(500).json({ error: 'Could not update profile.' });
+  }
 });
 
 app.get('/agora/token', (req, res) => {
@@ -89,61 +409,7 @@ app.get('/agora/token', (req, res) => {
   });
 });
 
-// Default public channels
-const DEFAULT_CHANNELS = [
-  { id: 'channel:general', name: 'General', topic: 'Team-wide real-time chat & updates' },
-  { id: 'channel:lounge', name: 'Lounge', topic: 'Casual hangouts, memes & quick syncs' },
-  { id: 'channel:projects', name: 'Projects', topic: 'Collaborate on builds & brainstorms' }
-];
-
-const MAX_HISTORY_PER_ROOM = 100;
-
-// Active users keyed by stable client userId
-const usersById = new Map();       // userId -> { id, name, avatar, color, status, socketId, peerId }
-const userIdBySocket = new Map();  // socketId -> userId
-const roomHistory = new Map();     // roomId -> Array<Message>
-const activeCalls = new Map();     // dmRoomId -> { callType, callerId, calleeId, connectedAt }
-
-function getDmRoomId(userA, userB) {
-  return `dm:${[userA, userB].sort().join(':')}`;
-}
-
-function getAgoraChannelName(userA, userB) {
-  const hash = crypto.createHash('sha256').update(getDmRoomId(userA, userB)).digest('hex').slice(0, 20);
-  return `pulse-${hash}-${Date.now().toString(36)}`;
-}
-
-function appendMessage(roomId, msg) {
-  if (!roomHistory.has(roomId)) {
-    roomHistory.set(roomId, []);
-  }
-  const list = roomHistory.get(roomId);
-  list.push(msg);
-  if (list.length > MAX_HISTORY_PER_ROOM) {
-    list.shift();
-  }
-}
-
-function findMessage(roomId, messageId) {
-  const list = roomHistory.get(roomId);
-  if (!list) return null;
-  return list.find((m) => m.id === messageId) || null;
-}
-
-function serializeUsers() {
-  return Array.from(usersById.values()).map((u) => ({
-    id: u.id,
-    name: u.name,
-    avatar: u.avatar,
-    color: u.color,
-    status: u.status
-  }));
-}
-
-function broadcastPresence() {
-  io.emit('presence:update', serializeUsers());
-}
-
+// ---------------- Call Helpers ----------------
 function formatCallDuration(ms) {
   const totalSec = Math.max(1, Math.round(ms / 1000));
   const mins = String(Math.floor(totalSec / 60)).padStart(2, '0');
@@ -151,30 +417,35 @@ function formatCallDuration(ms) {
   return `${mins}:${secs}`;
 }
 
-function recordCallLog(userAId, userBId, summaryText, callType = 'audio') {
+async function recordCallLog(userAId, userBId, summaryText, callType = 'audio') {
   if (!userAId || !userBId) return;
   const roomId = getDmRoomId(userAId, userBId);
   const logMsg = {
     id: `call-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    roomId,
+    targetType: 'dm',
+    participants: [userAId, userBId].sort(),
     type: 'call-log',
     callType,
-    roomId,
     senderId: userAId,
     text: summaryText,
     reactions: {},
     createdAt: Date.now()
   };
 
-  appendMessage(roomId, logMsg);
-  const userA = usersById.get(userAId);
-  const userB = usersById.get(userBId);
+  if (isDatabaseReady()) {
+    Message.create(logMsg).catch((err) => console.error('Save call-log error:', err.message));
+  }
+
+  const userA = onlineUsersById.get(userAId);
+  const userB = onlineUsersById.get(userBId);
   if (userA) io.to(userA.socketId).emit('message:new', { ...logMsg, dmPeerId: userBId });
   if (userB) io.to(userB.socketId).emit('message:new', { ...logMsg, dmPeerId: userAId });
 }
 
 function clearCallPairing(userAId, userBId, reason = 'ended') {
-  const userA = usersById.get(userAId);
-  const userB = usersById.get(userBId);
+  const userA = onlineUsersById.get(userAId);
+  const userB = onlineUsersById.get(userBId);
   const roomId = userAId && userBId ? getDmRoomId(userAId, userBId) : null;
   const session = roomId ? activeCalls.get(roomId) : null;
   if (roomId) activeCalls.delete(roomId);
@@ -203,84 +474,105 @@ function clearCallPairing(userAId, userBId, reason = 'ended') {
   broadcastPresence();
 }
 
+// ---------------- Socket Events ----------------
 io.on('connection', (socket) => {
-  // User registers profile on connect
-  socket.on('user:join', (payload = {}) => {
-    const cleanName = String(payload.name || 'Guest').trim().slice(0, 32) || 'Guest';
-    const userId = String(payload.id || socket.id).trim().slice(0, 64);
-    const avatar = String(payload.avatar || cleanName[0]?.toUpperCase() || 'G').slice(0, 4);
-    const color = String(payload.color || '#6366f1').slice(0, 48);
+  socket.on('user:join', async (payload = {}) => {
+    try {
+      if (!isDatabaseReady()) {
+        socket.emit('session:error', {
+          message: 'Database is not connected yet. Set MONGODB_URI on the backend.'
+        });
+        return;
+      }
 
-    // If same userId already connected on another socket, replace socket mapping cleanly
-    const existing = usersById.get(userId);
-    if (existing && existing.socketId !== socket.id) {
-      userIdBySocket.delete(existing.socketId);
+      const claims = verifyAuthToken(payload.token);
+      if (!claims) {
+        socket.emit('session:error', { message: 'Please log in to continue.' });
+        return;
+      }
+
+      const userDoc = await User.findOne({ userId: claims.userId }, { passwordHash: 0 }).lean();
+      if (!userDoc) {
+        socket.emit('session:error', { message: 'Account not found. Please log in again.' });
+        return;
+      }
+
+      const existing = onlineUsersById.get(userDoc.userId);
+      if (existing && existing.socketId !== socket.id) {
+        userIdBySocket.delete(existing.socketId);
+      }
+
+      const user = {
+        id: userDoc.userId,
+        name: userDoc.name,
+        username: userDoc.username,
+        avatar: userDoc.avatar,
+        color: userDoc.color,
+        status: existing?.peerId ? 'in-call' : 'online',
+        socketId: socket.id,
+        peerId: existing?.peerId || null
+      };
+
+      onlineUsersById.set(user.id, user);
+      userIdBySocket.set(socket.id, user.id);
+
+      for (const ch of DEFAULT_CHANNELS) {
+        socket.join(ch.id);
+      }
+
+      const [users, history] = await Promise.all([
+        buildAllUsersList(),
+        loadUserChatHistory(user.id)
+      ]);
+
+      socket.emit('session:ready', {
+        user: {
+          id: user.id,
+          name: user.name,
+          username: user.username,
+          avatar: user.avatar,
+          color: user.color,
+          status: user.status
+        },
+        channels: DEFAULT_CHANNELS,
+        users,
+        history
+      });
+
+      broadcastPresence();
+    } catch (err) {
+      console.error('user:join error:', err);
+      socket.emit('session:error', { message: 'Failed to load your session.' });
     }
-
-    const user = {
-      id: userId,
-      name: cleanName,
-      avatar,
-      color,
-      status: 'online',
-      socketId: socket.id,
-      peerId: null
-    };
-
-    usersById.set(userId, user);
-    userIdBySocket.set(socket.id, userId);
-
-    // Join default channels
-    for (const ch of DEFAULT_CHANNELS) {
-      socket.join(ch.id);
-    }
-
-    // Send initial bootstrap payload
-    const initialHistory = {};
-    for (const ch of DEFAULT_CHANNELS) {
-      initialHistory[ch.id] = roomHistory.get(ch.id) || [];
-    }
-
-    socket.emit('session:ready', {
-      user: {
-        id: user.id,
-        name: user.name,
-        avatar: user.avatar,
-        color: user.color,
-        status: user.status
-      },
-      channels: DEFAULT_CHANNELS,
-      users: serializeUsers(),
-      history: initialHistory
-    });
-
-    broadcastPresence();
   });
 
   // Load DM history on demand
-  socket.on('dm:history', ({ peerId }) => {
+  socket.on('dm:history', async ({ peerId }) => {
     const userId = userIdBySocket.get(socket.id);
-    if (!userId || !peerId) return;
+    if (!userId || !peerId || !isDatabaseReady()) return;
     const roomId = getDmRoomId(userId, peerId);
-    socket.emit('dm:history', {
-      roomId,
-      peerId,
-      messages: roomHistory.get(roomId) || []
-    });
+    try {
+      const docs = await Message.find({ roomId }).sort({ createdAt: 1 }).limit(MAX_HISTORY_PER_ROOM).lean();
+      socket.emit('dm:history', {
+        roomId,
+        peerId,
+        messages: docs.map((d) => ({ ...formatMessageDoc(d), dmPeerId: peerId }))
+      });
+    } catch (err) {
+      console.error('dm:history error:', err.message);
+    }
   });
 
   // Real-time messaging (channel or DM)
-  socket.on('message:send', (payload = {}) => {
+  socket.on('message:send', async (payload = {}) => {
     const senderId = userIdBySocket.get(socket.id);
-    const sender = usersById.get(senderId);
+    const sender = onlineUsersById.get(senderId);
     if (!sender) return;
 
     const { targetType, targetId, text, attachment, replyTo } = payload;
     const trimmedText = typeof text === 'string' ? text.trim().slice(0, 4000) : '';
-
     if (!trimmedText && !attachment) return;
 
-    // Basic validation on inline attachment
     let safeAttachment = null;
     if (attachment && typeof attachment === 'object' && typeof attachment.dataUrl === 'string') {
       if (attachment.dataUrl.length <= 4.5 * 1024 * 1024) {
@@ -301,13 +593,14 @@ io.on('connection', (socket) => {
       senderColor: sender.color,
       text: trimmedText,
       attachment: safeAttachment,
-      replyTo: replyTo && typeof replyTo === 'object'
-        ? {
-            id: String(replyTo.id || '').slice(0, 64),
-            senderName: String(replyTo.senderName || '').slice(0, 32),
-            text: String(replyTo.text || '').slice(0, 120)
-          }
-        : null,
+      replyTo:
+        replyTo && typeof replyTo === 'object'
+          ? {
+              id: String(replyTo.id || '').slice(0, 64),
+              senderName: String(replyTo.senderName || '').slice(0, 32),
+              text: String(replyTo.text || '').slice(0, 120)
+            }
+          : null,
       reactions: {},
       createdAt: Date.now()
     };
@@ -316,22 +609,36 @@ io.on('connection', (socket) => {
       const validChannel = DEFAULT_CHANNELS.some((c) => c.id === targetId);
       if (!validChannel) return;
 
-      message.roomId = targetId;
-      appendMessage(targetId, message);
-      io.to(targetId).emit('message:new', message);
+      const dbPayload = {
+        ...message,
+        roomId: targetId,
+        targetType: 'channel',
+        participants: []
+      };
+      if (isDatabaseReady()) {
+        await Message.create(dbPayload).catch((err) => console.error('Save channel msg error:', err.message));
+      }
+
+      io.to(targetId).emit('message:new', { ...message, roomId: targetId });
     } else if (targetType === 'dm') {
-      const recipient = usersById.get(targetId);
+      if (!targetId || targetId === sender.id) return;
       const roomId = getDmRoomId(sender.id, targetId);
-      message.roomId = roomId;
-      message.dmPeerId = targetId;
+      const dbPayload = {
+        ...message,
+        roomId,
+        targetType: 'dm',
+        participants: [sender.id, targetId].sort()
+      };
+      if (isDatabaseReady()) {
+        await Message.create(dbPayload).catch((err) => console.error('Save DM msg error:', err.message));
+      }
 
-      appendMessage(roomId, message);
-
-      // Deliver to sender and recipient
-      socket.emit('message:new', message);
+      socket.emit('message:new', { ...message, roomId, dmPeerId: targetId });
+      const recipient = onlineUsersById.get(targetId);
       if (recipient && recipient.socketId !== socket.id) {
         io.to(recipient.socketId).emit('message:new', {
           ...message,
+          roomId,
           dmPeerId: sender.id
         });
       }
@@ -339,32 +646,37 @@ io.on('connection', (socket) => {
   });
 
   // Message emoji reaction toggle
-  socket.on('message:react', ({ roomId, messageId, emoji, targetType, targetId }) => {
+  socket.on('message:react', async ({ roomId, messageId, emoji, targetType, targetId }) => {
     const userId = userIdBySocket.get(socket.id);
-    if (!userId || !roomId || !messageId || !emoji) return;
+    if (!userId || !roomId || !messageId || !emoji || !isDatabaseReady()) return;
+
     const cleanEmoji = String(emoji).slice(0, 8);
-    const msg = findMessage(roomId, messageId);
+    const msg = await Message.findOne({ id: messageId, roomId }).lean();
     if (!msg) return;
 
-    if (!msg.reactions[cleanEmoji]) {
-      msg.reactions[cleanEmoji] = [];
-    }
-    const idx = msg.reactions[cleanEmoji].indexOf(userId);
+    const reactions = { ...(msg.reactions || {}) };
+    const list = Array.isArray(reactions[cleanEmoji]) ? [...reactions[cleanEmoji]] : [];
+    const idx = list.indexOf(userId);
     if (idx === -1) {
-      msg.reactions[cleanEmoji].push(userId);
+      list.push(userId);
     } else {
-      msg.reactions[cleanEmoji].splice(idx, 1);
-      if (msg.reactions[cleanEmoji].length === 0) {
-        delete msg.reactions[cleanEmoji];
-      }
+      list.splice(idx, 1);
     }
 
-    const updatePayload = { roomId, messageId, reactions: msg.reactions };
+    if (list.length === 0) {
+      delete reactions[cleanEmoji];
+    } else {
+      reactions[cleanEmoji] = list;
+    }
+
+    await Message.updateOne({ id: messageId, roomId }, { $set: { reactions } });
+
+    const updatePayload = { roomId, messageId, reactions };
     if (targetType === 'channel') {
       io.to(roomId).emit('message:reacted', updatePayload);
     } else if (targetType === 'dm') {
       socket.emit('message:reacted', updatePayload);
-      const peer = usersById.get(targetId);
+      const peer = onlineUsersById.get(targetId);
       if (peer && peer.socketId !== socket.id) {
         io.to(peer.socketId).emit('message:reacted', updatePayload);
       }
@@ -372,22 +684,19 @@ io.on('connection', (socket) => {
   });
 
   // Delete own message
-  socket.on('message:delete', ({ roomId, messageId, targetType, targetId }) => {
+  socket.on('message:delete', async ({ roomId, messageId, targetType, targetId }) => {
     const userId = userIdBySocket.get(socket.id);
-    if (!userId || !roomId || !messageId) return;
-    const list = roomHistory.get(roomId);
-    if (!list) return;
+    if (!userId || !roomId || !messageId || !isDatabaseReady()) return;
 
-    const index = list.findIndex((m) => m.id === messageId && m.senderId === userId);
-    if (index === -1) return;
+    const result = await Message.deleteOne({ id: messageId, roomId, senderId: userId });
+    if (!result.deletedCount) return;
 
-    list.splice(index, 1);
     const payload = { roomId, messageId };
     if (targetType === 'channel') {
       io.to(roomId).emit('message:deleted', payload);
     } else if (targetType === 'dm') {
       socket.emit('message:deleted', payload);
-      const peer = usersById.get(targetId);
+      const peer = onlineUsersById.get(targetId);
       if (peer && peer.socketId !== socket.id) {
         io.to(peer.socketId).emit('message:deleted', payload);
       }
@@ -397,7 +706,7 @@ io.on('connection', (socket) => {
   // Typing indicators
   socket.on('typing:state', ({ targetType, targetId, isTyping }) => {
     const senderId = userIdBySocket.get(socket.id);
-    const sender = usersById.get(senderId);
+    const sender = onlineUsersById.get(senderId);
     if (!sender) return;
 
     const payload = {
@@ -411,7 +720,7 @@ io.on('connection', (socket) => {
     if (targetType === 'channel') {
       socket.to(targetId).emit('typing:state', { ...payload, roomId: targetId });
     } else if (targetType === 'dm') {
-      const peer = usersById.get(targetId);
+      const peer = onlineUsersById.get(targetId);
       if (peer && peer.socketId !== socket.id) {
         io.to(peer.socketId).emit('typing:state', {
           ...payload,
@@ -422,11 +731,10 @@ io.on('connection', (socket) => {
   });
 
   // -------------------- Agora Call Signaling --------------------
-
   socket.on('call:request', ({ to, callType }) => {
     const callerId = userIdBySocket.get(socket.id);
-    const caller = usersById.get(callerId);
-    const callee = usersById.get(to);
+    const caller = onlineUsersById.get(callerId);
+    const callee = onlineUsersById.get(to);
 
     if (!caller || caller.status === 'in-call' || caller.peerId) return;
     if (!callee) {
@@ -451,7 +759,6 @@ io.on('connection', (socket) => {
       connectedAt: null
     });
 
-    // Reserve pending call state so a third user cannot barge in while ringing
     caller.status = 'in-call';
     caller.peerId = callee.id;
     callee.status = 'in-call';
@@ -472,7 +779,7 @@ io.on('connection', (socket) => {
 
   socket.on('call:accept', ({ to }) => {
     const calleeId = userIdBySocket.get(socket.id);
-    const caller = usersById.get(to);
+    const caller = onlineUsersById.get(to);
     if (!calleeId || !caller) return;
 
     const roomId = getDmRoomId(calleeId, caller.id);
@@ -489,8 +796,8 @@ io.on('connection', (socket) => {
 
   socket.on('call:reject', ({ to, reason }) => {
     const calleeId = userIdBySocket.get(socket.id);
-    const callee = usersById.get(calleeId);
-    const caller = usersById.get(to);
+    const callee = onlineUsersById.get(calleeId);
+    const caller = onlineUsersById.get(to);
 
     if (calleeId && to) {
       const roomId = getDmRoomId(calleeId, to);
@@ -534,7 +841,7 @@ io.on('connection', (socket) => {
 
   socket.on('call:media-state', ({ to, micEnabled, camEnabled, screenSharing }) => {
     const userId = userIdBySocket.get(socket.id);
-    const peer = usersById.get(to);
+    const peer = onlineUsersById.get(to);
     if (!userId || !peer) return;
     io.to(peer.socketId).emit('call:media-state', {
       from: userId,
@@ -550,7 +857,7 @@ io.on('connection', (socket) => {
     userIdBySocket.delete(socket.id);
     if (!userId) return;
 
-    const user = usersById.get(userId);
+    const user = onlineUsersById.get(userId);
     if (!user || user.socketId !== socket.id) return;
 
     if (user.peerId) {
@@ -558,14 +865,19 @@ io.on('connection', (socket) => {
       clearCallPairing(userId, peerId, 'disconnected');
     }
 
-    usersById.delete(userId);
+    onlineUsersById.delete(userId);
     broadcastPresence();
   });
 });
 
-server.listen(PORT, HOST, () => {
-  console.log(`\n  Pulse Connect server running at:`);
-  console.log(`  -> Local:   http://localhost:${PORT}`);
-  console.log(`  -> Network: http://${HOST}:${PORT}`);
-  console.log(`  -> Serving frontend from: ${FRONTEND_DIR}\n`);
-});
+async function startServer() {
+  await connectDatabase();
+  server.listen(PORT, HOST, () => {
+    console.log(`\n  Pulse Connect server running at:`);
+    console.log(`  -> Local:   http://localhost:${PORT}`);
+    console.log(`  -> Network: http://${HOST}:${PORT}`);
+    console.log(`  -> Serving frontend from: ${FRONTEND_DIR}\n`);
+  });
+}
+
+startServer();

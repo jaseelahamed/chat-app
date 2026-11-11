@@ -99,10 +99,16 @@ export function renderUsers({
 }) {
   listEl.innerHTML = '';
   const peers = users.filter((u) => u.id !== meId);
-  countEl.textContent = String(peers.length);
+  const onlinePeersCount = peers.filter((u) => u.status !== 'offline').length;
+  countEl.textContent = String(onlinePeersCount);
 
   const query = filter.trim().toLowerCase();
-  const filtered = peers.filter((u) => !query || u.name.toLowerCase().includes(query));
+  const filtered = peers.filter(
+    (u) =>
+      !query ||
+      u.name.toLowerCase().includes(query) ||
+      (u.username && u.username.toLowerCase().includes(query))
+  );
 
   emptyHintEl.classList.toggle('hidden', peers.length > 0);
 
@@ -113,16 +119,21 @@ export function renderUsers({
 
     const roomId = getDmRoomId(meId, peer.id);
     const unread = unreadCounts.get(roomId) || 0;
+    const statusClass =
+      peer.status === 'in-call' ? 'in-call' : peer.status === 'online' ? 'online' : 'offline';
+    const handle = peer.username ? `@${peer.username} · ` : '';
+    const statusLabel =
+      peer.status === 'in-call' ? 'In a call' : peer.status === 'online' ? 'Online' : 'Offline';
 
     li.innerHTML = `
       <div class="nav-item-main">
         <div class="avatar-wrap">
           <div class="avatar sm"></div>
-          <span class="status-dot ${peer.status === 'in-call' ? 'in-call' : 'online'}"></span>
+          <span class="status-dot ${statusClass}"></span>
         </div>
         <div class="nav-label-wrap">
           <div class="nav-label"></div>
-          <div class="nav-sub">${peer.status === 'in-call' ? 'In a call' : 'Available'}</div>
+          <div class="nav-sub"></div>
         </div>
       </div>
       <div class="nav-item-actions">
@@ -144,6 +155,7 @@ export function renderUsers({
     avatarEl.textContent = peer.avatar;
     avatarEl.style.background = peer.color;
     li.querySelector('.nav-label').textContent = peer.name;
+    li.querySelector('.nav-sub').textContent = `${handle}${statusLabel}`;
 
     const actions = li.querySelector('.nav-item-actions');
     if (unread > 0) {

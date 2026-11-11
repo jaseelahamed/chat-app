@@ -113,15 +113,29 @@ const state = {
 
 let selectedAvatar = AVATAR_OPTIONS[0];
 let selectedColor = COLOR_OPTIONS[0];
+let authMode = 'login'; // 'login' | 'register' | 'profile'
 let typingTimeout = null;
 let isCurrentlyTyping = false;
 
+const TOKEN_STORAGE_KEY = 'pulse_auth_token';
+
 const dom = {
   authModal: document.getElementById('auth-modal'),
+  authTabs: document.getElementById('auth-tabs'),
+  tabLogin: document.getElementById('tab-login'),
+  tabRegister: document.getElementById('tab-register'),
   authForm: document.getElementById('auth-form'),
+  authError: document.getElementById('auth-error'),
   btnCloseAuth: document.getElementById('btn-close-auth'),
   btnAuthSubmit: document.getElementById('btn-auth-submit'),
+  fieldNameGroup: document.getElementById('field-name-group'),
+  fieldUsernameGroup: document.getElementById('field-username-group'),
+  fieldPasswordGroup: document.getElementById('field-password-group'),
+  fieldAvatarGroup: document.getElementById('field-avatar-group'),
+  fieldColorGroup: document.getElementById('field-color-group'),
   displayNameInput: document.getElementById('display-name'),
+  usernameInput: document.getElementById('auth-username'),
+  passwordInput: document.getElementById('auth-password'),
   avatarPicker: document.getElementById('avatar-picker'),
   colorPicker: document.getElementById('color-picker'),
   appShell: document.getElementById('app-shell'),
@@ -143,6 +157,7 @@ const dom = {
   iconSoundOn: document.getElementById('icon-sound-on'),
   iconSoundOff: document.getElementById('icon-sound-off'),
   btnEditProfile: document.getElementById('btn-edit-profile'),
+  btnLogout: document.getElementById('btn-logout'),
 
   headerAvatar: document.getElementById('header-avatar'),
   headerTitle: document.getElementById('header-title'),
@@ -188,7 +203,47 @@ const webrtc = new WebRTCManager({
   }
 });
 
-// ---------------- Profile Onboarding ----------------
+// ---------------- Account Auth & Profile ----------------
+function showAuthError(message) {
+  if (!message) {
+    dom.authError.textContent = '';
+    dom.authError.classList.add('hidden');
+    return;
+  }
+  dom.authError.textContent = message;
+  dom.authError.classList.remove('hidden');
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  showAuthError('');
+
+  const isLogin = mode === 'login';
+  const isRegister = mode === 'register';
+  const isProfile = mode === 'profile';
+
+  dom.authTabs.classList.toggle('hidden', isProfile);
+  dom.tabLogin.classList.toggle('active', isLogin);
+  dom.tabRegister.classList.toggle('active', isRegister);
+  dom.tabLogin.setAttribute('aria-selected', String(isLogin));
+  dom.tabRegister.setAttribute('aria-selected', String(isRegister));
+
+  dom.fieldNameGroup.classList.toggle('hidden', isLogin);
+  dom.fieldUsernameGroup.classList.toggle('hidden', isProfile);
+  dom.fieldPasswordGroup.classList.toggle('hidden', isProfile);
+  dom.fieldAvatarGroup.classList.toggle('hidden', isLogin);
+  dom.fieldColorGroup.classList.toggle('hidden', isLogin);
+
+  dom.displayNameInput.required = isRegister || isProfile;
+  dom.usernameInput.required = isLogin || isRegister;
+  dom.passwordInput.required = isLogin || isRegister;
+  dom.passwordInput.autocomplete = isRegister ? 'new-password' : 'current-password';
+
+  dom.btnCloseAuth.classList.toggle('hidden', !isProfile);
+  const label = isLogin ? 'Log In' : isRegister ? 'Create Account' : 'Save Profile';
+  dom.btnAuthSubmit.querySelector('span').textContent = label;
+}
+
 function initProfilePickers() {
   dom.avatarPicker.innerHTML = '';
   AVATAR_OPTIONS.forEach((av) => {
@@ -217,65 +272,136 @@ function initProfilePickers() {
   });
 }
 
-function getOrCreateClientId() {
-  let id = sessionStorage.getItem('pulse_user_id');
-  if (!id) {
-    id =
-      typeof crypto !== 'undefined' && crypto.randomUUID
-        ? crypto.randomUUID()
-        : `u-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    sessionStorage.setItem('pulse_user_id', id);
-  }
-  return id;
+function getStoredToken() {
+  return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
 }
 
-function joinWithProfile(profile) {
-  sessionStorage.setItem('pulse_profile', JSON.stringify(profile));
+function saveStoredToken(token) {
+  if (token) {
+    localStorage.setItem(TOKEN_STORAGE_KEY, token);
+  } else {
+    localStorage.removeItem(TOKEN_STORAGE_KEY);
+  }
+}
+
+function joinWithToken(token) {
+  if (!token) return;
   if (!socket) {
-    showToast(`Cannot join: backend unavailable at ${backendOrigin}.`, 'error');
+    showAuthError(`Cannot connect: backend unavailable at ${backendOrigin}.`);
     return;
   }
   if (!socket.connected) {
     showToast(`Connecting to ${backendOrigin}... (free Render servers take ~30s to wake up)`, 'info');
     return;
   }
-  socket.emit('user:join', profile);
+  socket.emit('user:join', { token });
 }
 
-const savedProfileRaw = sessionStorage.getItem('pulse_profile');
-if (savedProfileRaw) {
-  try {
-    const parsed = JSON.parse(savedProfileRaw);
-    selectedAvatar = parsed.avatar || selectedAvatar;
-    selectedColor = parsed.color || selectedColor;
-    dom.displayNameInput.value = parsed.name || '';
-  } catch {
-    // Ignore corrupt session value
-  }
+function logoutAccount() {
+  saveStoredToken('');
+  state.me = null;
+  state.users = [];
+  state.messagesByRoom.clear();
+  state.unreadCounts.clear();
+  state.typingUsersByRoom.clear();
+  state.activeTarget = { type: 'channel', id: 'channel:general' };
+
+  dom.appShell.classList.add('hidden');
+  dom.authModal.classList.remove('hidden');
+  dom.passwordInput.value = '';
+  setAuthMode('login');
 }
 
 initProfilePickers();
+setAuthMode('login');
 
-dom.authForm.addEventListener('submit', (e) => {
+dom.tabLogin.addEventListener('click', () => setAuthMode('login'));
+dom.tabRegister.addEventListener('click', () => setAuthMode('register'));
+
+dom.authForm.addEventListener('submit', async (e) => {
   e.preventDefault();
-  const name = dom.displayNameInput.value.trim();
-  if (!name) return;
-
+  showAuthError('');
   soundFX.ensureContext();
-  joinWithProfile({
-    id: getOrCreateClientId(),
-    name,
-    avatar: selectedAvatar,
-    color: selectedColor
-  });
+
+  const submitLabelEl = dom.btnAuthSubmit.querySelector('span');
+  const originalLabel = submitLabelEl.textContent;
+  dom.btnAuthSubmit.disabled = true;
+  submitLabelEl.textContent = 'Please wait...';
+
+  try {
+    if (authMode === 'profile') {
+      const token = getStoredToken();
+      const name = dom.displayNameInput.value.trim();
+      const res = await fetch(`${backendOrigin}/auth/profile`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          name,
+          avatar: selectedAvatar,
+          color: selectedColor
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || 'Could not update profile.');
+      }
+      state.me = { ...state.me, ...data.user };
+      dom.meAvatar.textContent = state.me.avatar;
+      dom.meAvatar.style.background = state.me.color;
+      dom.meName.textContent = state.me.name;
+      dom.authModal.classList.add('hidden');
+      showToast('Profile updated.', 'success');
+      return;
+    }
+
+    const endpoint = authMode === 'register' ? '/auth/register' : '/auth/login';
+    const body =
+      authMode === 'register'
+        ? {
+            name: dom.displayNameInput.value.trim(),
+            username: dom.usernameInput.value.trim(),
+            password: dom.passwordInput.value,
+            avatar: selectedAvatar,
+            color: selectedColor
+          }
+        : {
+            username: dom.usernameInput.value.trim(),
+            password: dom.passwordInput.value
+          };
+
+    const res = await fetch(`${backendOrigin}${endpoint}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(data.error || 'Authentication failed.');
+    }
+
+    saveStoredToken(data.token);
+    dom.passwordInput.value = '';
+    joinWithToken(data.token);
+  } catch (err) {
+    showAuthError(err.message || 'Could not reach server. Try again in a moment.');
+  } finally {
+    dom.btnAuthSubmit.disabled = false;
+    if (dom.btnAuthSubmit.querySelector('span').textContent === 'Please wait...') {
+      submitLabelEl.textContent = originalLabel;
+    }
+  }
 });
 
 dom.btnEditProfile.addEventListener('click', () => {
-  if (state.me) {
-    dom.displayNameInput.value = state.me.name;
-    dom.btnCloseAuth.classList.remove('hidden');
-    dom.btnAuthSubmit.querySelector('span').textContent = 'Save Profile';
-  }
+  if (!state.me) return;
+  selectedAvatar = state.me.avatar || selectedAvatar;
+  selectedColor = state.me.color || selectedColor;
+  initProfilePickers();
+  dom.displayNameInput.value = state.me.name;
+  setAuthMode('profile');
   dom.authModal.classList.remove('hidden');
 });
 
@@ -285,17 +411,20 @@ dom.btnCloseAuth.addEventListener('click', () => {
   }
 });
 
+dom.btnLogout.addEventListener('click', () => {
+  logoutAccount();
+  if (socket && socket.connected) {
+    socket.disconnect().connect();
+  }
+});
+
 let hasShownConnectError = false;
 if (socket) {
   socket.on('connect', () => {
     hasShownConnectError = false;
-    const existing = sessionStorage.getItem('pulse_profile');
-    if (existing) {
-      try {
-        socket.emit('user:join', JSON.parse(existing));
-      } catch {
-        // Ignore
-      }
+    const token = getStoredToken();
+    if (token) {
+      socket.emit('user:join', { token });
     }
   });
 
@@ -312,13 +441,27 @@ if (socket) {
       showToast('Connection lost — attempting to reconnect...', 'error');
     }
   });
+
+  if (socket.connected && getStoredToken()) {
+    socket.emit('user:join', { token: getStoredToken() });
+  }
 }
 
 // ---------------- Socket Events ----------------
+socket.on('session:error', ({ message }) => {
+  saveStoredToken('');
+  state.me = null;
+  dom.appShell.classList.add('hidden');
+  dom.authModal.classList.remove('hidden');
+  setAuthMode('login');
+  showAuthError(message || 'Session expired. Please log in again.');
+});
+
 socket.on('session:ready', ({ user, channels, users, history }) => {
   state.me = user;
   state.channels = channels;
   state.users = users;
+  state.messagesByRoom.clear();
 
   Object.entries(history).forEach(([roomId, msgs]) => {
     state.messagesByRoom.set(roomId, msgs);
@@ -482,8 +625,13 @@ function refreshHeader() {
       dom.headerAvatar.textContent = peer.avatar;
       dom.headerAvatar.style.background = peer.color;
       dom.headerTitle.textContent = peer.name;
+      const handle = peer.username ? `@${peer.username} · ` : '';
       dom.headerSubtitle.textContent =
-        peer.status === 'in-call' ? 'Currently in a call' : 'Online — ready to chat or call';
+        peer.status === 'in-call'
+          ? `${handle}Currently in a call`
+          : peer.status === 'online'
+          ? `${handle}Online — ready to chat or call`
+          : `${handle}Offline — messages are saved in chat history`;
       dom.dmCallButtons.classList.remove('hidden');
     } else {
       dom.headerAvatar.textContent = '?';
