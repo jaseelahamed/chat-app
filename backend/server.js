@@ -5,14 +5,29 @@ const http = require('http');
 const path = require('path');
 const { Server } = require('socket.io');
 const { RtcTokenBuilder, RtcRole } = require('agora-token');
-const { connectDatabase, isDatabaseReady, User, Message } = require('./db');
+const {
+  connectDatabase,
+  isDatabaseReady,
+  User,
+  Message,
+  CallSession,
+  ChatConsent
+} = require('./db');
+const { authenticateToken } = require('./middleware/auth');
+const {
+  getPlatformSettings,
+  createNotification,
+  atomicDebitCustomerCoins,
+  creditExecutiveForService
+} = require('./services/billing');
+const { evaluateExecutiveBonuses } = require('./services/bonuses');
+const { createAuthRouter } = require('./routes/auth');
+const { createWalletRouter } = require('./routes/wallet');
+const { createExecutiveRouter } = require('./routes/executive');
+const { createAdminRouter } = require('./routes/admin');
 
 const AGORA_APP_ID = (process.env.AGORA_APP_ID || '').trim();
 const AGORA_APP_CERTIFICATE = (process.env.AGORA_APP_CERTIFICATE || '').trim();
-const AUTH_SECRET =
-  (process.env.AUTH_SECRET || '').trim() ||
-  AGORA_APP_CERTIFICATE ||
-  'pulse-connect-auth-secret';
 
 const CORS_ORIGIN = process.env.CORS_ORIGIN
   ? process.env.CORS_ORIGIN.split(',').map((origin) => origin.trim()).filter(Boolean)
@@ -24,7 +39,7 @@ const io = new Server(server, {
   maxHttpBufferSize: 5 * 1024 * 1024, // 5 MB max payload for inline image/file shares
   cors: {
     origin: CORS_ORIGIN,
-    methods: ['GET', 'POST', 'PUT']
+    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
   }
 });
 
@@ -39,7 +54,7 @@ app.use((req, res, next) => {
   } else if (reqOrigin && CORS_ORIGIN.includes(reqOrigin)) {
     res.setHeader('Access-Control-Allow-Origin', reqOrigin);
   }
-  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization');
   if (req.method === 'OPTIONS') {
     return res.sendStatus(204);
@@ -47,10 +62,38 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use(express.json({ limit: '1mb' }));
+app.use(
+  express.json({
+    limit: '2mb',
+    verify: (req, _res, buf) => {
+      req.rawBody = buf;
+    }
+  })
+);
 app.use(express.static(FRONTEND_DIR));
 
-// Default public channels
+function createRateLimiter({ windowMs = 60000, max = 60 } = {}) {
+  const buckets = new Map();
+  return (req, res, next) => {
+    const key = req.ip || req.headers['x-forwarded-for'] || 'unknown';
+    const now = Date.now();
+    const entry = buckets.get(key);
+    if (!entry || now > entry.resetAt) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    entry.count += 1;
+    if (entry.count > max) {
+      return res.status(429).json({ error: 'Too many requests. Please slow down.' });
+    }
+    next();
+  };
+}
+
+const apiLimiter = createRateLimiter({ windowMs: 60000, max: 80 });
+app.use('/auth', apiLimiter);
+app.use('/wallet', apiLimiter);
+
 const DEFAULT_CHANNELS = [
   { id: 'channel:general', name: 'General', topic: 'Team-wide real-time chat & updates' },
   { id: 'channel:lounge', name: 'Lounge', topic: 'Casual hangouts, memes & quick syncs' },
@@ -60,66 +103,25 @@ const DEFAULT_CHANNELS = [
 const MAX_HISTORY_PER_ROOM = 100;
 
 // Live connection state keyed by userId
-const onlineUsersById = new Map(); // userId -> { id, name, username, avatar, color, status, socketId, peerId }
+const onlineUsersById = new Map(); // userId -> { id, role, name, username, avatar, color, status, socketId, peerId }
 const userIdBySocket = new Map();  // socketId -> userId
-const activeCalls = new Map();     // dmRoomId -> { callType, callerId, calleeId, channel, connectedAt }
-
-// ---------------- Auth Helpers ----------------
-function hashPassword(password) {
-  const salt = crypto.randomBytes(16).toString('hex');
-  const derived = crypto.scryptSync(password, salt, 64).toString('hex');
-  return `${salt}:${derived}`;
-}
-
-function verifyPassword(password, storedHash) {
-  const [salt, expectedHex] = String(storedHash || '').split(':');
-  if (!salt || !expectedHex) return false;
-  const actualBuf = crypto.scryptSync(password, salt, 64);
-  const expectedBuf = Buffer.from(expectedHex, 'hex');
-  if (actualBuf.length !== expectedBuf.length) return false;
-  return crypto.timingSafeEqual(actualBuf, expectedBuf);
-}
-
-function signAuthToken(payload) {
-  const body = {
-    ...payload,
-    exp: Date.now() + 30 * 24 * 60 * 60 * 1000
-  };
-  const encoded = Buffer.from(JSON.stringify(body)).toString('base64url');
-  const sig = crypto.createHmac('sha256', AUTH_SECRET).update(encoded).digest('base64url');
-  return `${encoded}.${sig}`;
-}
-
-function verifyAuthToken(token) {
-  if (!token || typeof token !== 'string') return null;
-  const parts = token.split('.');
-  if (parts.length !== 2) return null;
-  const [encoded, sig] = parts;
-  const expectedSig = crypto.createHmac('sha256', AUTH_SECRET).update(encoded).digest('base64url');
-  const sigBuf = Buffer.from(sig);
-  const expectedBuf = Buffer.from(expectedSig);
-  if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
-    if (!parsed.userId || (parsed.exp && parsed.exp < Date.now())) {
-      return null;
-    }
-    return parsed;
-  } catch {
-    return null;
-  }
-}
+const activeCalls = new Map();     // dmRoomId -> { callId, callType, callerId, calleeId, customerId, executiveId, isPaid, coinRatePerSec, channel, connectedAt, billedSeconds, billingTimer }
 
 function serializeDbUser(doc, liveEntry) {
+  let status = 'offline';
+  if (liveEntry) {
+    status = liveEntry.peerId ? 'in-call' : 'online';
+  }
   return {
     id: doc.userId,
+    role: doc.role || 'customer',
     name: doc.name,
-    username: doc.username,
+    username: doc.username || '',
     avatar: doc.avatar,
     color: doc.color,
-    status: liveEntry ? liveEntry.status : 'offline'
+    category: doc.category || 'Companion',
+    approvalStatus: doc.approvalStatus || 'approved',
+    status
   };
 }
 
@@ -127,6 +129,7 @@ async function buildAllUsersList() {
   if (!isDatabaseReady()) {
     return Array.from(onlineUsersById.values()).map((u) => ({
       id: u.id,
+      role: u.role,
       name: u.name,
       username: u.username,
       avatar: u.avatar,
@@ -135,10 +138,14 @@ async function buildAllUsersList() {
     }));
   }
 
-  const dbUsers = await User.find({}, { passwordHash: 0 }).sort({ name: 1 }).lean();
-  const list = dbUsers.map((doc) => serializeDbUser(doc, onlineUsersById.get(doc.userId)));
+  const dbUsers = await User.find(
+    { accountStatus: 'active', role: { $ne: 'admin' } },
+    { passwordHash: 0, sessions: 0, payoutDetails: 0, documents: 0 }
+  )
+    .sort({ name: 1 })
+    .lean();
 
-  // Sort online/in-call users before offline users
+  const list = dbUsers.map((doc) => serializeDbUser(doc, onlineUsersById.get(doc.userId)));
   const rank = { 'in-call': 0, online: 1, offline: 2 };
   list.sort((a, b) => (rank[a.status] ?? 2) - (rank[b.status] ?? 2) || a.name.localeCompare(b.name));
   return list;
@@ -153,16 +160,38 @@ async function broadcastPresence() {
   }
 }
 
+function emitCoinsToUser(userId, coinBalance) {
+  const online = onlineUsersById.get(userId);
+  if (online) {
+    io.to(online.socketId).emit('wallet:update', { coinBalance });
+  }
+}
+
+function emitBroadcastNotifications(userIds, payload) {
+  for (const uid of userIds) {
+    const online = onlineUsersById.get(uid);
+    if (online) {
+      io.to(online.socketId).emit('notification:new', payload);
+    }
+  }
+}
+
 function getDmRoomId(userA, userB) {
   return `dm:${[userA, userB].sort().join(':')}`;
 }
 
 function getAgoraChannelName(userA, userB) {
   const hash = crypto.createHash('sha256').update(getDmRoomId(userA, userB)).digest('hex').slice(0, 20);
-  return `pulse-${hash}-${Date.now().toString(36)}`;
+  return `pazhi-${hash}-${Date.now().toString(36)}`;
 }
 
-function formatMessageDoc(doc) {
+function formatMessageDoc(doc, viewerId = '') {
+  const viewOnceHidden =
+    Boolean(doc.viewOnce) &&
+    doc.senderId !== viewerId &&
+    Array.isArray(doc.viewedBy) &&
+    doc.viewedBy.includes(viewerId);
+
   return {
     id: doc.id,
     roomId: doc.roomId,
@@ -172,10 +201,20 @@ function formatMessageDoc(doc) {
     senderName: doc.senderName,
     senderAvatar: doc.senderAvatar,
     senderColor: doc.senderColor,
-    text: doc.text || '',
-    attachment: doc.attachment && doc.attachment.dataUrl ? doc.attachment : null,
+    text: viewOnceHidden ? 'View Once message expired' : doc.text || '',
+    attachment: viewOnceHidden
+      ? null
+      : doc.attachment && doc.attachment.dataUrl
+      ? doc.attachment
+      : null,
     replyTo: doc.replyTo && doc.replyTo.id ? doc.replyTo : null,
     reactions: doc.reactions || {},
+    deliveryStatus: doc.deliveryStatus || 'sent',
+    isPaid: Boolean(doc.isPaid),
+    coinsCharged: doc.coinsCharged || 0,
+    viewOnce: Boolean(doc.viewOnce),
+    viewOnceOpened: viewOnceHidden,
+    expiresAt: doc.expiresAt || null,
     createdAt: doc.createdAt
   };
 }
@@ -185,32 +224,34 @@ async function loadUserChatHistory(userId) {
   for (const ch of DEFAULT_CHANNELS) {
     history[ch.id] = [];
   }
-
   if (!isDatabaseReady()) return history;
 
-  // Load latest channel messages
+  const now = Date.now();
+  const notExpiredFilter = { $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }] };
+
   await Promise.all(
     DEFAULT_CHANNELS.map(async (ch) => {
-      const docs = await Message.find({ roomId: ch.id })
+      const docs = await Message.find({ roomId: ch.id, ...notExpiredFilter })
         .sort({ createdAt: -1 })
         .limit(MAX_HISTORY_PER_ROOM)
         .lean();
-      history[ch.id] = docs.reverse().map(formatMessageDoc);
+      history[ch.id] = docs.reverse().map((d) => formatMessageDoc(d, userId));
     })
   );
 
-  // Load all DM conversations involving this user
-  const dmDocs = await Message.find({ targetType: 'dm', participants: userId })
+  const dmDocs = await Message.find({
+    targetType: 'dm',
+    participants: userId,
+    ...notExpiredFilter
+  })
     .sort({ createdAt: 1 })
     .lean();
 
   for (const doc of dmDocs) {
-    if (!history[doc.roomId]) {
-      history[doc.roomId] = [];
-    }
+    if (!history[doc.roomId]) history[doc.roomId] = [];
     const peerId = (doc.participants || []).find((p) => p !== userId) || '';
     history[doc.roomId].push({
-      ...formatMessageDoc(doc),
+      ...formatMessageDoc(doc, userId),
       dmPeerId: peerId
     });
   }
@@ -218,7 +259,47 @@ async function loadUserChatHistory(userId) {
   return history;
 }
 
-// ---------------- REST Endpoints ----------------
+// ---------------- Mount REST Routers ----------------
+app.use(
+  '/auth',
+  createAuthRouter({
+    onPresenceChanged: (updatedUser) => {
+      if (updatedUser && onlineUsersById.has(updatedUser.userId)) {
+        const live = onlineUsersById.get(updatedUser.userId);
+        live.name = updatedUser.name;
+        live.avatar = updatedUser.avatar;
+        live.color = updatedUser.color;
+      }
+      broadcastPresence();
+    }
+  })
+);
+
+app.use(
+  '/wallet',
+  createWalletRouter({
+    onCoinsUpdated: emitCoinsToUser
+  })
+);
+
+app.use(
+  '/',
+  createExecutiveRouter({
+    onlineUsersById,
+    onPresenceChanged: broadcastPresence
+  })
+);
+
+app.use(
+  '/admin',
+  createAdminRouter({
+    onlineUsersById,
+    onPresenceChanged: broadcastPresence,
+    onCoinsUpdated: emitCoinsToUser,
+    onNotificationBroadcast: emitBroadcastNotifications
+  })
+);
+
 app.get('/health', (_req, res) => {
   res.json({
     status: 'ok',
@@ -226,150 +307,6 @@ app.get('/health', (_req, res) => {
     dbConnected: isDatabaseReady(),
     agoraConfigured: Boolean(AGORA_APP_ID && AGORA_APP_CERTIFICATE)
   });
-});
-
-app.post('/auth/register', async (req, res) => {
-  if (!isDatabaseReady()) {
-    return res.status(503).json({ error: 'Database is not connected. Set MONGODB_URI on the backend.' });
-  }
-
-  try {
-    const name = String(req.body?.name || '').trim().slice(0, 32);
-    const rawUsername = String(req.body?.username || '').trim().toLowerCase();
-    const password = String(req.body?.password || '');
-    const avatar = String(req.body?.avatar || name[0]?.toUpperCase() || '⚡').slice(0, 8);
-    const color = String(req.body?.color || 'linear-gradient(135deg, #6366f1, #8b5cf6)').slice(0, 96);
-
-    if (!name) {
-      return res.status(400).json({ error: 'Please enter your name.' });
-    }
-    if (!/^[a-z0-9._-]{3,24}$/.test(rawUsername)) {
-      return res.status(400).json({
-        error: 'Username must be 3–24 characters using letters, numbers, ".", "_", or "-".'
-      });
-    }
-    if (password.length < 4) {
-      return res.status(400).json({ error: 'Password must be at least 4 characters.' });
-    }
-
-    const existing = await User.findOne({ username: rawUsername }).lean();
-    if (existing) {
-      return res.status(409).json({ error: 'Username is already taken.' });
-    }
-
-    const userDoc = await User.create({
-      userId: crypto.randomUUID(),
-      name,
-      username: rawUsername,
-      passwordHash: hashPassword(password),
-      avatar,
-      color
-    });
-
-    const user = {
-      id: userDoc.userId,
-      name: userDoc.name,
-      username: userDoc.username,
-      avatar: userDoc.avatar,
-      color: userDoc.color
-    };
-
-    const token = signAuthToken({ userId: user.id, username: user.username });
-    broadcastPresence();
-    res.status(201).json({ token, user });
-  } catch (err) {
-    if (err.code === 11000) {
-      return res.status(409).json({ error: 'Username is already taken.' });
-    }
-    console.error('Register error:', err);
-    res.status(500).json({ error: 'Could not register account.' });
-  }
-});
-
-app.post('/auth/login', async (req, res) => {
-  if (!isDatabaseReady()) {
-    return res.status(503).json({ error: 'Database is not connected. Set MONGODB_URI on the backend.' });
-  }
-
-  try {
-    const username = String(req.body?.username || '').trim().toLowerCase();
-    const password = String(req.body?.password || '');
-
-    if (!username || !password) {
-      return res.status(400).json({ error: 'Username and password are required.' });
-    }
-
-    const userDoc = await User.findOne({ username }).lean();
-    if (!userDoc || !verifyPassword(password, userDoc.passwordHash)) {
-      return res.status(401).json({ error: 'Invalid username or password.' });
-    }
-
-    const user = {
-      id: userDoc.userId,
-      name: userDoc.name,
-      username: userDoc.username,
-      avatar: userDoc.avatar,
-      color: userDoc.color
-    };
-    const token = signAuthToken({ userId: user.id, username: user.username });
-    res.json({ token, user });
-  } catch (err) {
-    console.error('Login error:', err);
-    res.status(500).json({ error: 'Could not log in.' });
-  }
-});
-
-app.put('/auth/profile', async (req, res) => {
-  if (!isDatabaseReady()) {
-    return res.status(503).json({ error: 'Database is not connected.' });
-  }
-
-  const authHeader = String(req.headers.authorization || '');
-  const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7).trim() : '';
-  const claims = verifyAuthToken(token);
-  if (!claims) {
-    return res.status(401).json({ error: 'Unauthorized.' });
-  }
-
-  try {
-    const name = String(req.body?.name || '').trim().slice(0, 32);
-    const avatar = String(req.body?.avatar || '').slice(0, 8);
-    const color = String(req.body?.color || '').slice(0, 96);
-    if (!name) {
-      return res.status(400).json({ error: 'Name cannot be empty.' });
-    }
-
-    const updated = await User.findOneAndUpdate(
-      { userId: claims.userId },
-      { $set: { name, ...(avatar ? { avatar } : {}), ...(color ? { color } : {}) } },
-      { new: true }
-    ).lean();
-
-    if (!updated) {
-      return res.status(404).json({ error: 'Account not found.' });
-    }
-
-    const live = onlineUsersById.get(updated.userId);
-    if (live) {
-      live.name = updated.name;
-      live.avatar = updated.avatar;
-      live.color = updated.color;
-    }
-
-    await broadcastPresence();
-    res.json({
-      user: {
-        id: updated.userId,
-        name: updated.name,
-        username: updated.username,
-        avatar: updated.avatar,
-        color: updated.color
-      }
-    });
-  } catch (err) {
-    console.error('Profile update error:', err);
-    res.status(500).json({ error: 'Could not update profile.' });
-  }
 });
 
 app.get('/agora/token', (req, res) => {
@@ -409,7 +346,7 @@ app.get('/agora/token', (req, res) => {
   });
 });
 
-// ---------------- Call Helpers ----------------
+// ---------------- Call Billing & Cleanup ----------------
 function formatCallDuration(ms) {
   const totalSec = Math.max(1, Math.round(ms / 1000));
   const mins = String(Math.floor(totalSec / 60)).padStart(2, '0');
@@ -443,14 +380,137 @@ async function recordCallLog(userAId, userBId, summaryText, callType = 'audio') 
   if (userB) io.to(userB.socketId).emit('message:new', { ...logMsg, dmPeerId: userAId });
 }
 
-function clearCallPairing(userAId, userBId, reason = 'ended') {
+function startCallBillingTicker(roomId, session) {
+  if (!session.isPaid || !session.customerId || !session.executiveId || session.coinRatePerSec <= 0) {
+    return;
+  }
+  if (session.billingTimer) return;
+
+  session.billingTimer = setInterval(async () => {
+    const active = activeCalls.get(roomId);
+    if (!active || active.callId !== session.callId) {
+      clearInterval(session.billingTimer);
+      return;
+    }
+
+    const nextSec = active.billedSeconds + 1;
+    const idempotencyKey = `call:${active.callId}:sec:${nextSec}`;
+    const serviceType = active.callType === 'video' ? 'video' : 'audio';
+    const debitKind = serviceType === 'video' ? 'video_debit' : 'audio_debit';
+
+    try {
+      const debit = await atomicDebitCustomerCoins({
+        customerId: active.customerId,
+        coins: active.coinRatePerSec,
+        kind: debitKind,
+        referenceType: 'call',
+        referenceId: active.callId,
+        counterpartyId: active.executiveId,
+        idempotencyKey,
+        note: `${serviceType} call sec ${nextSec}`
+      });
+
+      if (!debit.ok) {
+        await createNotification({
+          userId: active.customerId,
+          category: 'wallet',
+          title: 'Call Ended — Insufficient Balance',
+          body: 'Your coin balance ran out during the call. Recharge to continue calling.'
+        });
+        clearCallPairing(active.customerId, active.executiveId, 'insufficient_balance', true);
+        return;
+      }
+
+      active.billedSeconds = nextSec;
+      active.totalCoinsCharged += debit.coinsCharged;
+
+      const earn = await creditExecutiveForService({
+        executiveId: active.executiveId,
+        customerId: active.customerId,
+        serviceType,
+        coinsCharged: debit.coinsCharged,
+        referenceType: 'call',
+        referenceId: active.callId,
+        idempotencyKey: `exec:${idempotencyKey}`,
+        note: `${serviceType} call earning`
+      });
+
+      active.execEarnedInr += earn.execNetInr || 0;
+      active.platformCommissionInr += earn.platformCommissionInr || 0;
+
+      await CallSession.updateOne(
+        { callId: active.callId },
+        {
+          $set: {
+            billedSeconds: active.billedSeconds,
+            totalCoinsCharged: active.totalCoinsCharged,
+            execEarnedInr: Math.round(active.execEarnedInr * 100) / 100,
+            platformCommissionInr: Math.round(active.platformCommissionInr * 100) / 100
+          }
+        }
+      );
+
+      const settings = await getPlatformSettings();
+      const lowBalance = debit.remainingCoins <= (settings.lowBalanceWarningCoins || 30);
+
+      const custOnline = onlineUsersById.get(active.customerId);
+      if (custOnline) {
+        io.to(custOnline.socketId).emit('call:billing-tick', {
+          callId: active.callId,
+          elapsedSeconds: nextSec,
+          remainingCoins: debit.remainingCoins,
+          ratePerSec: active.coinRatePerSec,
+          lowBalance
+        });
+        io.to(custOnline.socketId).emit('wallet:update', { coinBalance: debit.remainingCoins });
+      }
+
+      const execOnline = onlineUsersById.get(active.executiveId);
+      if (execOnline) {
+        io.to(execOnline.socketId).emit('call:billing-tick', {
+          callId: active.callId,
+          elapsedSeconds: nextSec,
+          earnedInr: Math.round(active.execEarnedInr * 100) / 100
+        });
+      }
+    } catch (err) {
+      console.error('Call billing tick error:', err.message);
+    }
+  }, 1000);
+}
+
+function clearCallPairing(userAId, userBId, reason = 'ended', notifyBoth = false) {
   const userA = onlineUsersById.get(userAId);
   const userB = onlineUsersById.get(userBId);
   const roomId = userAId && userBId ? getDmRoomId(userAId, userBId) : null;
   const session = roomId ? activeCalls.get(roomId) : null;
   if (roomId) activeCalls.delete(roomId);
 
+  if (session?.billingTimer) {
+    clearInterval(session.billingTimer);
+    session.billingTimer = null;
+  }
+
   if (session) {
+    if (isDatabaseReady() && session.callId) {
+      CallSession.updateOne(
+        { callId: session.callId },
+        {
+          $set: {
+            status: reason === 'cancelled' ? 'cancelled' : 'ended',
+            endedAt: Date.now(),
+            endReason: reason
+          }
+        }
+      )
+        .then(() => {
+          if (session.isPaid && session.executiveId) {
+            evaluateExecutiveBonuses(session.executiveId);
+          }
+        })
+        .catch((err) => console.error('Finalize CallSession error:', err.message));
+    }
+
     const label = session.callType === 'video' ? '📹 Video call' : '📞 Voice call';
     if (reason === 'cancelled') {
       recordCallLog(session.callerId, session.calleeId, `${label} · Missed`, session.callType);
@@ -465,6 +525,9 @@ function clearCallPairing(userAId, userBId, reason = 'ended') {
   if (userA) {
     userA.status = 'online';
     userA.peerId = null;
+    if (notifyBoth) {
+      io.to(userA.socketId).emit('call:ended', { from: userBId, reason });
+    }
   }
   if (userB) {
     userB.status = 'online';
@@ -485,18 +548,13 @@ io.on('connection', (socket) => {
         return;
       }
 
-      const claims = verifyAuthToken(payload.token);
-      if (!claims) {
+      const auth = await authenticateToken(payload.token);
+      if (!auth) {
         socket.emit('session:error', { message: 'Please log in to continue.' });
         return;
       }
 
-      const userDoc = await User.findOne({ userId: claims.userId }, { passwordHash: 0 }).lean();
-      if (!userDoc) {
-        socket.emit('session:error', { message: 'Account not found. Please log in again.' });
-        return;
-      }
-
+      const userDoc = auth.user;
       const existing = onlineUsersById.get(userDoc.userId);
       if (existing && existing.socketId !== socket.id) {
         userIdBySocket.delete(existing.socketId);
@@ -504,8 +562,9 @@ io.on('connection', (socket) => {
 
       const user = {
         id: userDoc.userId,
+        role: userDoc.role || 'customer',
         name: userDoc.name,
-        username: userDoc.username,
+        username: userDoc.username || '',
         avatar: userDoc.avatar,
         color: userDoc.color,
         status: existing?.peerId ? 'in-call' : 'online',
@@ -520,23 +579,34 @@ io.on('connection', (socket) => {
         socket.join(ch.id);
       }
 
-      const [users, history] = await Promise.all([
+      const [users, history, settings] = await Promise.all([
         buildAllUsersList(),
-        loadUserChatHistory(user.id)
+        loadUserChatHistory(user.id),
+        getPlatformSettings()
       ]);
 
       socket.emit('session:ready', {
         user: {
           id: user.id,
+          role: user.role,
           name: user.name,
           username: user.username,
           avatar: user.avatar,
           color: user.color,
-          status: user.status
+          status: user.status,
+          coinBalance: userDoc.coinBalance || 0,
+          bonusCoinBalance: userDoc.bonusCoinBalance || 0,
+          approvalStatus: userDoc.approvalStatus || 'approved',
+          earnings: userDoc.earnings || {}
         },
         channels: DEFAULT_CHANNELS,
         users,
-        history
+        history,
+        pricing: {
+          chatCoinPerMessage: settings.chatCoinPerMessage,
+          audioCoinPerSecond: settings.audioCoinPerSecond,
+          videoCoinPerSecond: settings.videoCoinPerSecond
+        }
       });
 
       broadcastPresence();
@@ -546,30 +616,66 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Customer grants/revokes executive chat initiation consent
+  socket.on('chat:consent', async ({ executiveId, accepted }) => {
+    const userId = userIdBySocket.get(socket.id);
+    if (!userId || !executiveId || !isDatabaseReady()) return;
+
+    const consentKey = `${userId}:${executiveId}`;
+    await ChatConsent.updateOne(
+      { consentKey },
+      {
+        $set: {
+          consentKey,
+          customerId: userId,
+          executiveId,
+          accepted: Boolean(accepted),
+          updatedAt: Date.now()
+        }
+      },
+      { upsert: true }
+    );
+
+    const execOnline = onlineUsersById.get(executiveId);
+    if (execOnline) {
+      io.to(execOnline.socketId).emit('chat:consent-updated', {
+        customerId: userId,
+        accepted: Boolean(accepted)
+      });
+    }
+  });
+
   // Load DM history on demand
   socket.on('dm:history', async ({ peerId }) => {
     const userId = userIdBySocket.get(socket.id);
     if (!userId || !peerId || !isDatabaseReady()) return;
     const roomId = getDmRoomId(userId, peerId);
+    const now = Date.now();
     try {
-      const docs = await Message.find({ roomId }).sort({ createdAt: 1 }).limit(MAX_HISTORY_PER_ROOM).lean();
+      const docs = await Message.find({
+        roomId,
+        $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }]
+      })
+        .sort({ createdAt: 1 })
+        .limit(MAX_HISTORY_PER_ROOM)
+        .lean();
       socket.emit('dm:history', {
         roomId,
         peerId,
-        messages: docs.map((d) => ({ ...formatMessageDoc(d), dmPeerId: peerId }))
+        messages: docs.map((d) => ({ ...formatMessageDoc(d, userId), dmPeerId: peerId }))
       });
     } catch (err) {
       console.error('dm:history error:', err.message);
     }
   });
 
-  // Real-time messaging (channel or DM)
+  // Real-time messaging (channel or DM, with paid billing for customer <-> executive DMs)
   socket.on('message:send', async (payload = {}) => {
     const senderId = userIdBySocket.get(socket.id);
     const sender = onlineUsersById.get(senderId);
     if (!sender) return;
 
-    const { targetType, targetId, text, attachment, replyTo } = payload;
+    const { targetType, targetId, text, attachment, replyTo, viewOnce } = payload;
     const trimmedText = typeof text === 'string' ? text.trim().slice(0, 4000) : '';
     if (!trimmedText && !attachment) return;
 
@@ -585,8 +691,9 @@ io.on('connection', (socket) => {
       }
     }
 
+    const msgId = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const message = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      id: msgId,
       senderId: sender.id,
       senderName: sender.name,
       senderAvatar: sender.avatar,
@@ -602,6 +709,11 @@ io.on('connection', (socket) => {
             }
           : null,
       reactions: {},
+      deliveryStatus: 'sent',
+      isPaid: false,
+      coinsCharged: 0,
+      viewOnce: Boolean(viewOnce),
+      expiresAt: null,
       createdAt: Date.now()
     };
 
@@ -618,19 +730,141 @@ io.on('connection', (socket) => {
       if (isDatabaseReady()) {
         await Message.create(dbPayload).catch((err) => console.error('Save channel msg error:', err.message));
       }
-
       io.to(targetId).emit('message:new', { ...message, roomId: targetId });
-    } else if (targetType === 'dm') {
+      return;
+    }
+
+    if (targetType === 'dm') {
       if (!targetId || targetId === sender.id) return;
       const roomId = getDmRoomId(sender.id, targetId);
-      const dbPayload = {
-        ...message,
-        roomId,
-        targetType: 'dm',
-        participants: [sender.id, targetId].sort()
-      };
+
       if (isDatabaseReady()) {
-        await Message.create(dbPayload).catch((err) => console.error('Save DM msg error:', err.message));
+        const [senderDoc, targetDoc, settings] = await Promise.all([
+          User.findOne({ userId: sender.id }).lean(),
+          User.findOne({ userId: targetId }).lean(),
+          getPlatformSettings()
+        ]);
+
+        if (!senderDoc || !targetDoc || targetDoc.accountStatus !== 'active') {
+          socket.emit('message:error', { error: 'Recipient is unavailable.' });
+          return;
+        }
+
+        if (
+          (senderDoc.blockedUsers || []).includes(targetId) ||
+          (targetDoc.blockedUsers || []).includes(sender.id)
+        ) {
+          socket.emit('message:error', { error: 'Messaging is blocked between these accounts.' });
+          return;
+        }
+
+        if (settings.messageExpirySeconds > 0) {
+          message.expiresAt = Date.now() + settings.messageExpirySeconds * 1000;
+        }
+        if (!settings.viewOnceEnabled) {
+          message.viewOnce = false;
+        }
+
+        const isCustomerExecPair =
+          (senderDoc.role === 'customer' && targetDoc.role === 'executive') ||
+          (senderDoc.role === 'executive' && targetDoc.role === 'customer');
+
+        if (isCustomerExecPair) {
+          const customerDoc = senderDoc.role === 'customer' ? senderDoc : targetDoc;
+          const executiveDoc = senderDoc.role === 'executive' ? senderDoc : targetDoc;
+
+          if (executiveDoc.approvalStatus !== 'approved') {
+            socket.emit('message:error', { error: 'Executive account is awaiting Admin approval.' });
+            return;
+          }
+
+          if (senderDoc.role === 'executive') {
+            const consent = await ChatConsent.findOne({
+              consentKey: `${customerDoc.userId}:${executiveDoc.userId}`,
+              accepted: true
+            }).lean();
+            const priorCustomerMsg = await Message.exists({
+              roomId,
+              senderId: customerDoc.userId
+            });
+            if (!consent && !priorCustomerMsg) {
+              const custOnline = onlineUsersById.get(customerDoc.userId);
+              if (custOnline) {
+                io.to(custOnline.socketId).emit('chat:consent-request', {
+                  executive: {
+                    id: executiveDoc.userId,
+                    name: executiveDoc.name,
+                    avatar: executiveDoc.avatar
+                  }
+                });
+              }
+              socket.emit('message:error', {
+                error: 'Customer consent is required before an executive can start a paid chat.'
+              });
+              return;
+            }
+          }
+
+          let chargeCoins = settings.chatCoinPerMessage || 0;
+          if (settings.freeMessagesEnabled && settings.freeMessageLimit > 0) {
+            const sentCount = await Message.countDocuments({
+              roomId,
+              senderId: customerDoc.userId
+            });
+            if (sentCount < settings.freeMessageLimit) {
+              chargeCoins = 0;
+            }
+          }
+
+          if (chargeCoins > 0) {
+            const debit = await atomicDebitCustomerCoins({
+              customerId: customerDoc.userId,
+              coins: chargeCoins,
+              kind: 'chat_debit',
+              referenceType: 'message',
+              referenceId: msgId,
+              counterpartyId: executiveDoc.userId,
+              idempotencyKey: `msg:${msgId}`,
+              note: `Paid chat message with ${executiveDoc.name}`
+            });
+
+            if (!debit.ok) {
+              socket.emit('message:error', {
+                error: 'Insufficient coin balance. Please recharge to send paid messages.',
+                code: 'insufficient_balance',
+                remainingCoins: debit.remainingCoins
+              });
+              return;
+            }
+
+            message.isPaid = true;
+            message.coinsCharged = debit.coinsCharged;
+
+            await creditExecutiveForService({
+              executiveId: executiveDoc.userId,
+              customerId: customerDoc.userId,
+              serviceType: 'chat',
+              coinsCharged: debit.coinsCharged,
+              referenceType: 'message',
+              referenceId: msgId,
+              idempotencyKey: `exec:msg:${msgId}`,
+              note: `Paid chat message from ${customerDoc.name}`
+            });
+
+            emitCoinsToUser(customerDoc.userId, debit.remainingCoins);
+            evaluateExecutiveBonuses(executiveDoc.userId);
+          }
+        }
+
+        const recipientOnline = onlineUsersById.get(targetId);
+        message.deliveryStatus = recipientOnline ? 'delivered' : 'sent';
+
+        await Message.create({
+          ...message,
+          roomId,
+          targetType: 'dm',
+          participants: [sender.id, targetId].sort()
+        });
       }
 
       socket.emit('message:new', { ...message, roomId, dmPeerId: targetId });
@@ -645,6 +879,28 @@ io.on('connection', (socket) => {
     }
   });
 
+  socket.on('message:read', async ({ roomId, targetId }) => {
+    const userId = userIdBySocket.get(socket.id);
+    if (!userId || !roomId || !isDatabaseReady()) return;
+    await Message.updateMany(
+      { roomId, senderId: targetId, deliveryStatus: { $ne: 'read' } },
+      { $set: { deliveryStatus: 'read' } }
+    );
+    const peer = onlineUsersById.get(targetId);
+    if (peer) {
+      io.to(peer.socketId).emit('message:read', { roomId, readerId: userId });
+    }
+  });
+
+  socket.on('message:view-once', async ({ roomId, messageId }) => {
+    const userId = userIdBySocket.get(socket.id);
+    if (!userId || !roomId || !messageId || !isDatabaseReady()) return;
+    await Message.updateOne(
+      { id: messageId, roomId, viewOnce: true },
+      { $addToSet: { viewedBy: userId } }
+    );
+  });
+
   // Message emoji reaction toggle
   socket.on('message:react', async ({ roomId, messageId, emoji, targetType, targetId }) => {
     const userId = userIdBySocket.get(socket.id);
@@ -657,17 +913,11 @@ io.on('connection', (socket) => {
     const reactions = { ...(msg.reactions || {}) };
     const list = Array.isArray(reactions[cleanEmoji]) ? [...reactions[cleanEmoji]] : [];
     const idx = list.indexOf(userId);
-    if (idx === -1) {
-      list.push(userId);
-    } else {
-      list.splice(idx, 1);
-    }
+    if (idx === -1) list.push(userId);
+    else list.splice(idx, 1);
 
-    if (list.length === 0) {
-      delete reactions[cleanEmoji];
-    } else {
-      reactions[cleanEmoji] = list;
-    }
+    if (list.length === 0) delete reactions[cleanEmoji];
+    else reactions[cleanEmoji] = list;
 
     await Message.updateOne({ id: messageId, roomId }, { $set: { reactions } });
 
@@ -730,8 +980,8 @@ io.on('connection', (socket) => {
     }
   });
 
-  // -------------------- Agora Call Signaling --------------------
-  socket.on('call:request', ({ to, callType }) => {
+  // -------------------- Agora Call Signaling & Per-Second Billing --------------------
+  socket.on('call:request', async ({ to, callType }) => {
     const callerId = userIdBySocket.get(socket.id);
     const caller = onlineUsersById.get(callerId);
     const callee = onlineUsersById.get(to);
@@ -751,12 +1001,96 @@ io.on('connection', (socket) => {
     const normalizedType = callType === 'video' ? 'video' : 'audio';
     const roomId = getDmRoomId(caller.id, callee.id);
     const channel = getAgoraChannelName(caller.id, callee.id);
+    const callId = `call_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+
+    let isPaid = false;
+    let customerId = null;
+    let executiveId = null;
+    let coinRatePerSec = 0;
+
+    if (isDatabaseReady()) {
+      const [callerDoc, calleeDoc, settings] = await Promise.all([
+        User.findOne({ userId: caller.id }).lean(),
+        User.findOne({ userId: callee.id }).lean(),
+        getPlatformSettings()
+      ]);
+
+      if (
+        (callerDoc?.blockedUsers || []).includes(callee.id) ||
+        (calleeDoc?.blockedUsers || []).includes(caller.id)
+      ) {
+        socket.emit('call:unavailable', { to, reason: 'Calling is blocked for this account.' });
+        return;
+      }
+
+      const isPair =
+        (callerDoc?.role === 'customer' && calleeDoc?.role === 'executive') ||
+        (callerDoc?.role === 'executive' && calleeDoc?.role === 'customer');
+
+      if (isPair) {
+        const custDoc = callerDoc.role === 'customer' ? callerDoc : calleeDoc;
+        const execDoc = callerDoc.role === 'executive' ? callerDoc : calleeDoc;
+
+        if (execDoc.approvalStatus !== 'approved') {
+          socket.emit('call:unavailable', { to, reason: 'Executive is not approved yet.' });
+          return;
+        }
+        if (normalizedType === 'audio' && execDoc.availability?.audioEnabled === false) {
+          socket.emit('call:unavailable', { to, reason: 'Executive has disabled audio calls.' });
+          return;
+        }
+        if (normalizedType === 'video' && execDoc.availability?.videoEnabled === false) {
+          socket.emit('call:unavailable', { to, reason: 'Executive has disabled video calls.' });
+          return;
+        }
+
+        coinRatePerSec =
+          normalizedType === 'video' ? settings.videoCoinPerSecond || 2 : settings.audioCoinPerSecond || 1;
+        if ((custDoc.coinBalance || 0) < coinRatePerSec) {
+          socket.emit('call:unavailable', {
+            to,
+            reason: `Insufficient coins (${coinRatePerSec} coins/sec required). Please recharge.`
+          });
+          return;
+        }
+
+        isPaid = true;
+        customerId = custDoc.userId;
+        executiveId = execDoc.userId;
+      }
+
+      await CallSession.create({
+        callId,
+        roomId,
+        channel,
+        callType: normalizedType,
+        callerId: caller.id,
+        calleeId: callee.id,
+        customerId,
+        executiveId,
+        isPaid,
+        status: 'ringing',
+        coinRatePerSec,
+        startedAt: Date.now()
+      });
+    }
+
     activeCalls.set(roomId, {
+      callId,
       callType: normalizedType,
       callerId: caller.id,
       calleeId: callee.id,
+      customerId,
+      executiveId,
+      isPaid,
+      coinRatePerSec,
       channel,
-      connectedAt: null
+      connectedAt: null,
+      billedSeconds: 0,
+      totalCoinsCharged: 0,
+      execEarnedInr: 0,
+      platformCommissionInr: 0,
+      billingTimer: null
     });
 
     caller.status = 'in-call';
@@ -773,11 +1107,13 @@ io.on('connection', (socket) => {
         color: caller.color
       },
       callType: normalizedType,
-      channel
+      channel,
+      isPaid,
+      coinRatePerSec
     });
   });
 
-  socket.on('call:accept', ({ to }) => {
+  socket.on('call:accept', async ({ to }) => {
     const calleeId = userIdBySocket.get(socket.id);
     const caller = onlineUsersById.get(to);
     if (!calleeId || !caller) return;
@@ -786,11 +1122,20 @@ io.on('connection', (socket) => {
     const session = activeCalls.get(roomId);
     if (session) {
       session.connectedAt = Date.now();
+      if (isDatabaseReady() && session.callId) {
+        await CallSession.updateOne(
+          { callId: session.callId },
+          { $set: { status: 'active', connectedAt: session.connectedAt } }
+        );
+      }
+      startCallBillingTicker(roomId, session);
     }
 
     io.to(caller.socketId).emit('call:accepted', {
       from: calleeId,
-      channel: session?.channel || getAgoraChannelName(calleeId, caller.id)
+      channel: session?.channel || getAgoraChannelName(calleeId, caller.id),
+      isPaid: Boolean(session?.isPaid),
+      coinRatePerSec: session?.coinRatePerSec || 0
     });
   });
 
@@ -803,7 +1148,14 @@ io.on('connection', (socket) => {
       const roomId = getDmRoomId(calleeId, to);
       const session = activeCalls.get(roomId);
       activeCalls.delete(roomId);
+      if (session?.billingTimer) clearInterval(session.billingTimer);
       if (session) {
+        if (isDatabaseReady() && session.callId) {
+          CallSession.updateOne(
+            { callId: session.callId },
+            { $set: { status: 'rejected', endedAt: Date.now(), endReason: reason || 'declined' } }
+          ).catch(() => {});
+        }
         const label = session.callType === 'video' ? '📹 Video call' : '📞 Voice call';
         recordCallLog(
           session.callerId,
@@ -851,7 +1203,6 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Clean up on disconnect
   socket.on('disconnect', () => {
     const userId = userIdBySocket.get(socket.id);
     userIdBySocket.delete(socket.id);
@@ -873,7 +1224,7 @@ io.on('connection', (socket) => {
 async function startServer() {
   await connectDatabase();
   server.listen(PORT, HOST, () => {
-    console.log(`\n  Pulse Connect server running at:`);
+    console.log(`\n  Pazhi backend server running at:`);
     console.log(`  -> Local:   http://localhost:${PORT}`);
     console.log(`  -> Network: http://${HOST}:${PORT}`);
     console.log(`  -> Serving frontend from: ${FRONTEND_DIR}\n`);

@@ -94,21 +94,27 @@ export function renderUsers({
   unreadCounts,
   getDmRoomId,
   filter,
+  categoryFilter = 'all',
   onSelectUser,
   onCallUser
 }) {
   listEl.innerHTML = '';
-  const peers = users.filter((u) => u.id !== meId);
+  const peers = users.filter((u) => u.id !== meId && (u.role !== 'executive' || u.approvalStatus === 'approved'));
   const onlinePeersCount = peers.filter((u) => u.status !== 'offline').length;
   countEl.textContent = String(onlinePeersCount);
 
   const query = filter.trim().toLowerCase();
-  const filtered = peers.filter(
-    (u) =>
+  const filtered = peers.filter((u) => {
+    const matchesSearch =
       !query ||
       u.name.toLowerCase().includes(query) ||
-      (u.username && u.username.toLowerCase().includes(query))
-  );
+      (u.username && u.username.toLowerCase().includes(query)) ||
+      (u.category && u.category.toLowerCase().includes(query));
+    if (!matchesSearch) return false;
+    if (categoryFilter === 'online') return u.status === 'online';
+    if (categoryFilter && categoryFilter !== 'all') return u.category === categoryFilter;
+    return true;
+  });
 
   emptyHintEl.classList.toggle('hidden', peers.length > 0);
 
@@ -121,7 +127,7 @@ export function renderUsers({
     const unread = unreadCounts.get(roomId) || 0;
     const statusClass =
       peer.status === 'in-call' ? 'in-call' : peer.status === 'online' ? 'online' : 'offline';
-    const handle = peer.username ? `@${peer.username} · ` : '';
+    const roleTag = peer.role === 'executive' ? `${peer.category || 'Executive'} · ` : '';
     const statusLabel =
       peer.status === 'in-call' ? 'In a call' : peer.status === 'online' ? 'Online' : 'Offline';
 
@@ -155,7 +161,7 @@ export function renderUsers({
     avatarEl.textContent = peer.avatar;
     avatarEl.style.background = peer.color;
     li.querySelector('.nav-label').textContent = peer.name;
-    li.querySelector('.nav-sub').textContent = `${handle}${statusLabel}`;
+    li.querySelector('.nav-sub').textContent = `${roleTag}${statusLabel}`;
 
     const actions = li.querySelector('.nav-item-actions');
     if (unread > 0) {
@@ -190,7 +196,8 @@ export function renderMessages({
   onReply,
   onReact,
   onDelete,
-  onOpenLightbox
+  onOpenLightbox,
+  onViewOnce
 }) {
   listEl.innerHTML = '';
 
@@ -237,7 +244,15 @@ export function renderMessages({
     senderSpan.className = 'msg-sender';
     senderSpan.textContent = isOwn ? 'You' : msg.senderName;
     const timeSpan = document.createElement('span');
-    timeSpan.textContent = formatTime(msg.createdAt);
+    const tick = isOwn
+      ? msg.deliveryStatus === 'read'
+        ? ' · ✓✓'
+        : msg.deliveryStatus === 'delivered'
+        ? ' · ✓✓'
+        : ' · ✓'
+      : '';
+    const paidTag = msg.isPaid && msg.coinsCharged ? ` · 🪙${msg.coinsCharged}` : '';
+    timeSpan.textContent = `${formatTime(msg.createdAt)}${tick}${paidTag}`;
     meta.append(senderSpan, timeSpan);
 
     const bubbleContainer = document.createElement('div');
@@ -245,6 +260,31 @@ export function renderMessages({
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';
+
+    if (msg.viewOnce && !isOwn && !msg.viewOnceOpened) {
+      const voBtn = document.createElement('button');
+      voBtn.type = 'button';
+      voBtn.className = 'btn-chip sm';
+      voBtn.textContent = '👁 View Once Message (Tap to open)';
+      voBtn.addEventListener('click', () => {
+        onViewOnce?.(msg);
+        voBtn.remove();
+        if (msg.text) {
+          const td = document.createElement('div');
+          td.textContent = msg.text;
+          bubble.appendChild(td);
+        }
+        if (msg.attachment?.dataUrl && String(msg.attachment.type || '').startsWith('image/')) {
+          onOpenLightbox(msg.attachment.dataUrl);
+        }
+      });
+      bubble.appendChild(voBtn);
+      bubbleContainer.append(bubble);
+      bodyWrap.append(meta, bubbleContainer);
+      row.append(avatar, bodyWrap);
+      listEl.appendChild(row);
+      return;
+    }
 
     if (msg.replyTo) {
       const quote = document.createElement('div');

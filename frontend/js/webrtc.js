@@ -1,11 +1,12 @@
 import { soundFX } from './sound.js';
 
 export class WebRTCManager {
-  constructor({ socket, backendOrigin, showToast, onCallStateChange }) {
+  constructor({ socket, backendOrigin, showToast, onCallStateChange, onOpenWallet }) {
     this.socket = socket;
     this.backendOrigin = (backendOrigin || window.location.origin).replace(/\/+$/, '');
     this.showToast = showToast;
     this.onCallStateChange = onCallStateChange;
+    this.onOpenWallet = onOpenWallet;
 
     this.client = null;
     this.localAudioTrack = null;
@@ -59,7 +60,10 @@ export class WebRTCManager {
       btnMic: document.getElementById('btn-toggle-mic'),
       btnCam: document.getElementById('btn-toggle-cam'),
       btnShare: document.getElementById('btn-share-screen'),
-      btnEnd: document.getElementById('btn-end-call')
+      btnEnd: document.getElementById('btn-end-call'),
+      billingHud: document.getElementById('call-billing-hud'),
+      coinsBadge: document.getElementById('call-coins-badge'),
+      btnInCallRecharge: document.getElementById('btn-in-call-recharge')
     };
 
     this.bindUIEvents();
@@ -83,10 +87,11 @@ export class WebRTCManager {
     this.dom.btnShare.addEventListener('click', () => this.toggleScreenShare());
     this.dom.btnMinimize.addEventListener('click', () => this.setMinimized(true));
     this.dom.btnRestore.addEventListener('click', () => this.setMinimized(false));
+    this.dom.btnInCallRecharge?.addEventListener('click', () => this.onOpenWallet?.());
   }
 
   bindSocketEvents() {
-    this.socket.on('call:incoming', ({ from, callType, channel }) => {
+    this.socket.on('call:incoming', ({ from, callType, channel, isPaid, coinRatePerSec }) => {
       if (this.activeCall || this.pendingIncoming) {
         this.socket.emit('call:reject', { to: from.id, reason: 'busy' });
         return;
@@ -96,8 +101,9 @@ export class WebRTCManager {
       this.dom.incomingAvatar.textContent = from.avatar;
       this.dom.incomingAvatar.style.background = from.color;
       this.dom.incomingName.textContent = from.name;
+      const rateSuffix = isPaid && coinRatePerSec ? ` · ${coinRatePerSec}c/sec` : '';
       this.dom.incomingBadge.textContent =
-        callType === 'video' ? 'Incoming Video Call' : 'Incoming Voice Call';
+        (callType === 'video' ? 'Incoming Video Call' : 'Incoming Voice Call') + rateSuffix;
       this.dom.incomingModal.classList.remove('hidden');
       soundFX.startRingtone(false);
     });
@@ -150,13 +156,29 @@ export class WebRTCManager {
       }
       if (this.activeCall) {
         const msg =
-          reason === 'disconnected'
+          reason === 'insufficient_balance'
+            ? 'Call ended: coin balance exhausted.'
+            : reason === 'disconnected'
             ? 'Peer disconnected from call.'
             : reason === 'cancelled'
             ? 'Call cancelled.'
             : 'Call ended.';
-        this.showToast(msg, 'info');
+        this.showToast(msg, reason === 'insufficient_balance' ? 'error' : 'info');
         this.cleanupCall();
+      }
+    });
+
+    this.socket.on('call:billing-tick', ({ remainingCoins, earnedInr, lowBalance }) => {
+      if (!this.activeCall || !this.dom.billingHud) return;
+      this.dom.billingHud.classList.remove('hidden');
+      if (typeof remainingCoins === 'number') {
+        this.dom.coinsBadge.textContent = `🪙 ${remainingCoins}`;
+        this.dom.billingHud.classList.toggle('low-balance', Boolean(lowBalance));
+        this.dom.btnInCallRecharge?.classList.remove('hidden');
+      } else if (typeof earnedInr === 'number') {
+        this.dom.coinsBadge.textContent = `₹${earnedInr.toFixed(2)}`;
+        this.dom.billingHud.classList.remove('low-balance');
+        this.dom.btnInCallRecharge?.classList.add('hidden');
       }
     });
 
@@ -717,6 +739,11 @@ export class WebRTCManager {
     this.dom.overlay.classList.add('hidden');
     this.dom.btnRestore.classList.add('hidden');
     this.dom.incomingModal.classList.add('hidden');
+    if (this.dom.billingHud) {
+      this.dom.billingHud.classList.add('hidden');
+      this.dom.billingHud.classList.remove('low-balance');
+      this.dom.btnInCallRecharge?.classList.add('hidden');
+    }
     this.onCallStateChange?.(false);
   }
 }

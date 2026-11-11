@@ -42,9 +42,10 @@
         </button>
       </div>
 
-      <div id="auth-tabs" class="auth-tabs" role="tablist">
+      <div id="auth-tabs" class="auth-tabs three" role="tablist">
         <button id="tab-login" type="button" class="auth-tab active" role="tab" aria-selected="true">Log In</button>
-        <button id="tab-register" type="button" class="auth-tab" role="tab" aria-selected="false">Register</button>
+        <button id="tab-register-customer" type="button" class="auth-tab" role="tab" aria-selected="false">Customer</button>
+        <button id="tab-register-executive" type="button" class="auth-tab" role="tab" aria-selected="false">Executive</button>
       </div>
 
       <form id="auth-form" class="auth-form">
@@ -52,37 +53,57 @@
 
         <div id="field-name-group" class="field-group hidden">
           <label for="display-name">Full Name</label>
-          <input
-            id="display-name"
-            type="text"
-            placeholder="e.g. Alex, Maya, Jordan..."
-            maxlength="32"
-            autocomplete="name"
-          />
+          <input id="display-name" type="text" placeholder="e.g. Alex, Maya..." maxlength="48" autocomplete="name" />
         </div>
 
         <div id="field-username-group" class="field-group">
-          <label for="auth-username">Username</label>
-          <input
-            id="auth-username"
-            type="text"
-            placeholder="e.g. alex_01"
-            maxlength="24"
-            required
-            autocomplete="username"
-          />
+          <label id="label-username" for="auth-username">Email or Mobile</label>
+          <input id="auth-username" type="text" placeholder="email@example.com or mobile" maxlength="120" required autocomplete="username" />
+        </div>
+
+        <div id="field-email-group" class="field-group hidden">
+          <label for="auth-email">Email</label>
+          <input id="auth-email" type="email" placeholder="you@example.com" maxlength="120" autocomplete="email" />
+        </div>
+
+        <div id="field-mobile-group" class="field-group hidden">
+          <label for="auth-mobile">Mobile Number</label>
+          <input id="auth-mobile" type="tel" placeholder="+91 98765 43210" maxlength="18" autocomplete="tel" />
         </div>
 
         <div id="field-password-group" class="field-group">
           <label for="auth-password">Password</label>
-          <input
-            id="auth-password"
-            type="password"
-            placeholder="Minimum 4 characters"
-            minlength="4"
-            required
-            autocomplete="current-password"
-          />
+          <input id="auth-password" type="password" placeholder="Minimum 4 characters" minlength="4" required autocomplete="current-password" />
+        </div>
+
+        <div id="exec-register-fields" class="exec-fields hidden">
+          <div class="field-group">
+            <label for="exec-category">Category</label>
+            <select id="exec-category">
+              <option value="Companion">Companion</option>
+              <option value="Listener">Listener</option>
+              <option value="Dating">Dating</option>
+              <option value="Life Coach">Life Coach</option>
+              <option value="Friendship">Friendship</option>
+            </select>
+          </div>
+          <div class="field-group">
+            <label for="exec-languages">Languages (comma-separated)</label>
+            <input id="exec-languages" type="text" placeholder="English, Malayalam, Hindi" value="English, Malayalam" />
+          </div>
+          <div class="field-group">
+            <label for="exec-experience">Experience &amp; Bio</label>
+            <input id="exec-experience" type="text" placeholder="e.g. Friendly conversationalist, 2 yrs" maxlength="200" />
+          </div>
+          <div class="field-group">
+            <label for="exec-upi">UPI ID (for Withdrawals)</label>
+            <input id="exec-upi" type="text" placeholder="yourname@upi" maxlength="80" />
+          </div>
+        </div>
+
+        <div id="field-bio-group" class="field-group hidden">
+          <label for="profile-bio">Bio</label>
+          <input id="profile-bio" type="text" placeholder="Tell people a bit about yourself..." maxlength="200" />
         </div>
 
         <div id="field-avatar-group" class="field-group hidden">
@@ -95,13 +116,28 @@
           <div id="color-picker" class="color-picker"></div>
         </div>
 
+        <div id="compliance-checks" class="compliance-checks hidden">
+          <label class="check-inline"><input id="chk-age18" type="checkbox" /> I confirm I am 18 years or older</label>
+          <label class="check-inline"><input id="chk-terms" type="checkbox" /> I accept the Terms &amp; Conditions and Privacy Policy</label>
+        </div>
+
         <button id="btn-auth-submit" type="submit" class="btn btn-primary btn-lg">
           <span>Log In</span>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
             <path d="M5 12h14M13 5l7 7-7 7" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </button>
+
+        <div id="profile-extra-actions" class="profile-extra-actions hidden">
+          <button id="btn-logout-all" type="button" class="link-btn danger-text">Log out all devices</button>
+          <button id="btn-deactivate-account" type="button" class="link-btn danger-text">Deactivate account</button>
+        </div>
       </form>
+
+      <div id="auth-footer-links" class="auth-footer-links">
+        <button id="btn-open-forgot" type="button" class="link-btn">Forgot password?</button>
+        <a href="./admin.html" class="link-btn">Super Admin Panel &rarr;</a>
+      </div>
     </div>
   </div>
 
@@ -133,7 +169,40 @@
           <circle cx="11" cy="11" r="8" />
           <path d="M21 21l-4.35-4.35" stroke-linecap="round" />
         </svg>
-        <input id="sidebar-search" type="text" placeholder="Search channels or people..." autocomplete="off" />
+        <input id="sidebar-search" type="text" placeholder="Search people or category..." autocomplete="off" />
+      </div>
+
+      <!-- Customer Wallet Bar -->
+      <div id="customer-wallet-bar" class="role-card hidden">
+        <div>
+          <div class="role-card-label">Coin Wallet</div>
+          <div id="sidebar-coin-balance" class="role-card-val">🪙 0 Coins</div>
+        </div>
+        <button id="btn-open-wallet" type="button" class="btn-chip">Wallet &amp; Top Up</button>
+      </div>
+
+      <!-- Executive Availability & Earnings Bar -->
+      <div id="exec-sidebar-bar" class="role-card exec hidden">
+        <div class="exec-bar-top">
+          <select id="exec-availability-select" class="mini-select" title="Availability status">
+            <option value="available">Available</option>
+            <option value="busy">Busy</option>
+            <option value="offline">Offline</option>
+          </select>
+          <button id="btn-open-exec-dash" type="button" class="btn-chip">Earnings</button>
+        </div>
+        <div id="exec-approval-banner" class="exec-approval-note hidden">Pending Admin Approval</div>
+      </div>
+
+      <div id="discovery-filter-row" class="discovery-filter-row">
+        <select id="discovery-filter" class="mini-select full">
+          <option value="all">All Users / Executives</option>
+          <option value="online">Online Now</option>
+          <option value="Companion">Category: Companion</option>
+          <option value="Listener">Category: Listener</option>
+          <option value="Dating">Category: Dating</option>
+          <option value="Life Coach">Category: Life Coach</option>
+        </select>
       </div>
 
       <div class="sidebar-scroll">
@@ -165,6 +234,12 @@
           </div>
         </div>
         <div class="me-actions">
+          <button id="btn-notifications" class="icon-btn" title="Notifications" aria-label="Notifications">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="17" height="17">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M13.73 21a2 2 0 0 1-3.46 0" stroke-linecap="round" />
+            </svg>
+          </button>
           <button id="btn-sound-toggle" class="icon-btn" title="Toggle notification sounds" aria-label="Toggle sounds">
             <svg id="icon-sound-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="17" height="17">
               <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
@@ -234,6 +309,8 @@
               </svg>
               <span>Video Call</span>
             </button>
+            <button id="btn-block-peer" class="icon-btn" title="Block / Unblock user" aria-label="Block user">🚫</button>
+            <button id="btn-report-peer" class="icon-btn" title="Report user" aria-label="Report user">🚩</button>
           </div>
         </div>
       </header>
@@ -290,6 +367,7 @@
             maxlength="4000"
           ></textarea>
 
+          <button id="btn-view-once" type="button" class="icon-btn" title="Toggle View Once message" aria-label="View Once">👁</button>
           <button id="btn-voice-note" type="button" class="icon-btn" title="Send voice message" aria-label="Record voice message">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="19" height="19">
               <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z" />
@@ -352,7 +430,12 @@
         </div>
       </div>
 
-      <button id="btn-minimize-call" class="icon-btn glass-btn" title="Minimize to chat" aria-label="Minimize call">
+      <div class="call-topbar-right">
+        <div id="call-billing-hud" class="call-billing-hud hidden">
+          <span id="call-coins-badge" class="call-coins-badge">🪙 0</span>
+          <button id="btn-in-call-recharge" type="button" class="btn-chip sm hidden">+ Recharge</button>
+        </div>
+        <button id="btn-minimize-call" class="icon-btn glass-btn" title="Minimize to chat" aria-label="Minimize call">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18">
           <polyline points="4 14 10 14 10 20" stroke-linecap="round" stroke-linejoin="round" />
           <polyline points="20 10 14 10 14 4" stroke-linecap="round" stroke-linejoin="round" />
@@ -439,6 +522,121 @@
     </div>
   </div>
 
+  <!-- Coin Wallet & Recharge Modal -->
+  <div id="wallet-modal" class="modal-backdrop hidden">
+    <div class="glass-card feature-modal">
+      <div class="feature-modal-header">
+        <div>
+          <h2>Coin Wallet &amp; Recharge</h2>
+          <p id="wallet-summary-sub">Available: 0 Coins (Bonus: 0)</p>
+        </div>
+        <button id="btn-close-wallet" type="button" class="icon-btn" aria-label="Close">&times;</button>
+      </div>
+      <div class="auth-tabs" style="margin-bottom:14px;">
+        <button id="wallet-tab-buy" type="button" class="auth-tab active">Buy Coins</button>
+        <button id="wallet-tab-history" type="button" class="auth-tab">History</button>
+      </div>
+      <div id="wallet-buy-pane">
+        <div id="wallet-packages-grid" class="packages-grid"></div>
+      </div>
+      <div id="wallet-history-pane" class="hidden">
+        <div id="wallet-history-list" class="history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Executive Earnings & Withdrawal Modal -->
+  <div id="exec-modal" class="modal-backdrop hidden">
+    <div class="glass-card feature-modal">
+      <div class="feature-modal-header">
+        <div>
+          <h2>Executive Earnings &amp; Payouts</h2>
+          <p id="exec-avail-sub">Available for withdrawal: ₹0</p>
+        </div>
+        <button id="btn-close-exec" type="button" class="icon-btn" aria-label="Close">&times;</button>
+      </div>
+      <div class="auth-tabs three" style="margin-bottom:14px;">
+        <button id="exec-tab-earnings" type="button" class="auth-tab active">Earnings</button>
+        <button id="exec-tab-withdraw" type="button" class="auth-tab">Withdrawals</button>
+        <button id="exec-tab-bonuses" type="button" class="auth-tab">Bonuses</button>
+      </div>
+      <div id="exec-earnings-pane">
+        <div class="exec-controls-row">
+          <select id="exec-earnings-range" class="mini-select">
+            <option value="today">Today</option>
+            <option value="yesterday">Yesterday</option>
+            <option value="week">This Week</option>
+            <option value="month">This Month</option>
+            <option value="prev_month">Previous Month</option>
+            <option value="all" selected>All Time</option>
+          </select>
+        </div>
+        <div id="exec-earnings-grid" class="exec-stats-grid"></div>
+        <div class="exec-service-toggles">
+          <label class="check-inline"><input id="chk-svc-chat" type="checkbox" checked /> Chat Enabled</label>
+          <label class="check-inline"><input id="chk-svc-audio" type="checkbox" checked /> Audio Calls</label>
+          <label class="check-inline"><input id="chk-svc-video" type="checkbox" checked /> Video Calls</label>
+        </div>
+      </div>
+      <div id="exec-withdraw-pane" class="hidden">
+        <form id="exec-withdraw-form" class="auth-form" style="margin-bottom:14px;">
+          <div class="field-group">
+            <label for="wd-amount">Amount (INR)</label>
+            <input id="wd-amount" type="number" min="1" placeholder="e.g. 500" required />
+          </div>
+          <div class="field-group">
+            <label for="wd-upi">UPI ID (or leave blank to use profile payout)</label>
+            <input id="wd-upi" type="text" placeholder="yourname@upi" />
+          </div>
+          <button type="submit" class="btn btn-primary btn-lg">Request Withdrawal</button>
+        </form>
+        <div id="exec-withdraw-list" class="history-list"></div>
+      </div>
+      <div id="exec-bonuses-pane" class="hidden">
+        <div id="exec-bonuses-list" class="history-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Notifications Modal -->
+  <div id="notifications-modal" class="modal-backdrop hidden">
+    <div class="glass-card feature-modal">
+      <div class="feature-modal-header">
+        <h2>Notifications</h2>
+        <button id="btn-close-notifications" type="button" class="icon-btn" aria-label="Close">&times;</button>
+      </div>
+      <div id="notifications-list" class="history-list"></div>
+    </div>
+  </div>
+
+  <!-- Forgot Password Modal -->
+  <div id="forgot-modal" class="modal-backdrop hidden">
+    <div class="glass-card auth-card">
+      <div class="feature-modal-header">
+        <h2>Reset Password</h2>
+        <button id="btn-close-forgot" type="button" class="icon-btn" aria-label="Close">&times;</button>
+      </div>
+      <form id="forgot-form" class="auth-form">
+        <div class="field-group">
+          <label for="forgot-identifier">Registered Email or Mobile</label>
+          <input id="forgot-identifier" type="text" required placeholder="you@example.com" />
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg">Generate Reset Token</button>
+      </form>
+      <form id="reset-form" class="auth-form hidden" style="margin-top:14px;">
+        <div class="field-group">
+          <label for="reset-token-input">Reset Token</label>
+          <input id="reset-token-input" type="text" required />
+        </div>
+        <div class="field-group">
+          <label for="reset-new-password">New Password</label>
+          <input id="reset-new-password" type="password" minlength="4" required />
+        </div>
+        <button type="submit" class="btn btn-primary btn-lg">Set New Password</button>
+      </form>
+    </div>
+  </div>
+
   <!-- Image Lightbox -->
   <div id="lightbox" class="modal-backdrop hidden">
     <button id="btn-close-lightbox" class="lightbox-close" aria-label="Close preview">&times;</button>
@@ -448,6 +646,7 @@
   <!-- Toast Container -->
   <div id="toast-container" class="toast-container"></div>
 
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/agora-rtc-sdk-ng@4.24.9/AgoraRTC_N-production.js"></script>
   <script src="./config.js"></script>

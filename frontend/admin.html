@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#070b14" />
+  <title>Pazhi — Super Admin Panel</title>
+  <link rel="icon" type="image/svg+xml" href="./icons/icon.svg" />
+  <link rel="stylesheet" href="./css/admin.css" />
+</head>
+<body>
+  <!-- Login View -->
+  <div id="admin-login-view" class="admin-login-wrap">
+    <div class="admin-card login-card">
+      <div class="admin-brand">
+        <div class="brand-badge">P</div>
+        <div>
+          <h1>Pazhi Super Admin</h1>
+          <p>Sign in with your administrator credentials</p>
+        </div>
+      </div>
+
+      <form id="admin-login-form" class="admin-form">
+        <div id="admin-login-error" class="alert error hidden"></div>
+        <div class="field">
+          <label for="admin-email">Email or Username</label>
+          <input id="admin-email" type="text" placeholder="admin@pazhi.app" required autocomplete="username" />
+        </div>
+        <div class="field">
+          <label for="admin-password">Password</label>
+          <input id="admin-password" type="password" placeholder="Enter admin password" required autocomplete="current-password" />
+        </div>
+        <button id="btn-admin-login" type="submit" class="btn primary full">Sign In to Admin Panel</button>
+      </form>
+      <div class="login-hint">
+        <a href="./index.html">&larr; Back to Pazhi App</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Dashboard Shell -->
+  <div id="admin-shell" class="admin-shell hidden">
+    <aside class="admin-sidebar">
+      <div class="sidebar-brand">
+        <div class="brand-badge sm">P</div>
+        <div>
+          <div class="brand-title">Pazhi Admin</div>
+          <div id="admin-role-label" class="brand-sub">Super Admin</div>
+        </div>
+      </div>
+
+      <nav class="admin-nav">
+        <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+        <button class="nav-btn" data-tab="executives">Executives &amp; Approvals</button>
+        <button class="nav-btn" data-tab="customers">Customers</button>
+        <button class="nav-btn" data-tab="pricing">Packages &amp; Pricing</button>
+        <button class="nav-btn" data-tab="withdrawals">Withdrawals &amp; Payments</button>
+        <button class="nav-btn" data-tab="bonuses">Bonuses &amp; Announcements</button>
+        <button class="nav-btn" data-tab="monitoring">Monitoring, Ledger &amp; Logs</button>
+      </nav>
+
+      <div class="sidebar-footer">
+        <a class="btn ghost full" href="./index.html">Open Chat App</a>
+        <button id="btn-admin-logout" class="btn danger full">Log Out</button>
+      </div>
+    </aside>
+
+    <main class="admin-main">
+      <header class="admin-topbar">
+        <div>
+          <h2 id="tab-heading">Dashboard Overview</h2>
+          <p id="tab-subheading">Real-time platform revenue, users, and operations</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="btn-refresh-tab" class="btn ghost">Refresh</button>
+        </div>
+      </header>
+
+      <div id="admin-toast-wrap" class="toast-wrap"></div>
+
+      <!-- TAB: Dashboard -->
+      <section id="tab-dashboard" class="tab-panel">
+        <div class="toolbar">
+          <label>Period:
+            <select id="dashboard-days">
+              <option value="0">All Time</option>
+              <option value="1">Last 24 Hours</option>
+              <option value="7">Last 7 Days</option>
+              <option value="30">Last 30 Days</option>
+              <option value="365">Last 1 Year</option>
+            </select>
+          </label>
+          <button id="btn-export-ledger" class="btn ghost">Export Ledger CSV</button>
+        </div>
+        <div id="kpi-grid" class="kpi-grid"></div>
+      </section>
+
+      <!-- TAB: Executives -->
+      <section id="tab-executives" class="tab-panel hidden">
+        <div class="toolbar">
+          <label>Approval Filter:
+            <select id="exec-approval-filter">
+              <option value="">All Executives</option>
+              <option value="pending">Pending Approval</option>
+              <option value="approved">Approved</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </label>
+        </div>
+        <div id="executives-table-wrap" class="table-wrap"></div>
+      </section>
+
+      <!-- TAB: Customers -->
+      <section id="tab-customers" class="tab-panel hidden">
+        <div class="toolbar">
+          <input id="customer-search" type="search" placeholder="Search name, email, mobile..." />
+          <select id="customer-status-filter">
+            <option value="">All Statuses</option>
+            <option value="active">Active</option>
+            <option value="suspended">Suspended</option>
+            <option value="blocked">Blocked</option>
+            <option value="deactivated">Deactivated</option>
+          </select>
+          <button id="btn-search-customers" class="btn primary">Search</button>
+        </div>
+        <div id="customers-table-wrap" class="table-wrap"></div>
+      </section>
+
+      <!-- TAB: Packages & Pricing -->
+      <section id="tab-pricing" class="tab-panel hidden">
+        <div class="two-col">
+          <div class="admin-card">
+            <h3>Service Pricing, Commissions &amp; Platform Settings</h3>
+            <form id="settings-form" class="grid-form">
+              <div class="field"><label>Platform Name</label><input name="platformName" type="text" /></div>
+              <div class="field"><label>Chat Cost (Coins / Msg)</label><input name="chatCoinPerMessage" type="number" min="0" /></div>
+              <div class="field"><label>Audio Call (Coins / Sec)</label><input name="audioCoinPerSecond" type="number" min="0" /></div>
+              <div class="field"><label>Video Call (Coins / Sec)</label><input name="videoCoinPerSecond" type="number" min="0" /></div>
+              <div class="field"><label>Coin to INR Rate (₹ / Coin)</label><input name="coinToInrRate" type="number" step="0.01" min="0.01" /></div>
+              <div class="field"><label>Chat Exec Share (%)</label><input name="chatExecPct" type="number" min="0" max="100" /></div>
+              <div class="field"><label>Audio Exec Share (%)</label><input name="audioExecPct" type="number" min="0" max="100" /></div>
+              <div class="field"><label>Video Exec Share (%)</label><input name="videoExecPct" type="number" min="0" max="100" /></div>
+              <div class="field"><label>Min Withdrawal (INR)</label><input name="minWithdrawalInr" type="number" min="1" /></div>
+              <div class="field"><label>Low Balance Warning (Coins)</label><input name="lowBalanceWarningCoins" type="number" min="0" /></div>
+              <div class="field"><label>Msg Expiry (Seconds, 0=off)</label><input name="messageExpirySeconds" type="number" min="0" /></div>
+              <div class="field"><label>Free Msg Limit</label><input name="freeMessageLimit" type="number" min="0" /></div>
+              <label class="check-row"><input name="freeMessagesEnabled" type="checkbox" /> Enable Free Messages</label>
+              <label class="check-row"><input name="viewOnceEnabled" type="checkbox" /> Enable View Once Messages</label>
+              <label class="check-row"><input name="maintenanceMode" type="checkbox" /> Maintenance Mode</label>
+              <div class="field full-span"><label>Support Email</label><input name="supportEmail" type="email" /></div>
+              <div class="full-span"><button type="submit" class="btn primary">Save Settings</button></div>
+            </form>
+          </div>
+
+          <div class="admin-card">
+            <h3>Create Coin Package</h3>
+            <form id="package-form" class="grid-form">
+              <div class="field"><label>Package Name</label><input name="name" type="text" placeholder="e.g. Mega Pack" required /></div>
+              <div class="field"><label>Price (INR)</label><input name="priceInr" type="number" min="1" required /></div>
+              <div class="field"><label>Coins</label><input name="coins" type="number" min="1" required /></div>
+              <div class="field"><label>Bonus Coins</label><input name="bonusCoins" type="number" min="0" value="0" /></div>
+              <div class="field"><label>Display Order</label><input name="displayOrder" type="number" value="0" /></div>
+              <label class="check-row"><input name="isPromotional" type="checkbox" /> Promotional Badge</label>
+              <div class="full-span"><button type="submit" class="btn primary">Add Coin Package</button></div>
+            </form>
+            <h4 class="sub-heading">Existing Packages</h4>
+            <div id="packages-table-wrap" class="table-wrap"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Withdrawals & Payments -->
+      <section id="tab-withdrawals" class="tab-panel hidden">
+        <div class="admin-card">
+          <div class="toolbar">
+            <h3>Executive Withdrawal Requests</h3>
+            <select id="withdrawal-status-filter">
+              <option value="">All</option>
+              <option value="pending">Pending</option>
+              <option value="approved">Approved</option>
+              <option value="processing">Processing</option>
+              <option value="completed">Completed</option>
+              <option value="rejected">Rejected</option>
+            </select>
+          </div>
+          <div id="withdrawals-table-wrap" class="table-wrap"></div>
+        </div>
+
+        <div class="admin-card" style="margin-top: 16px;">
+          <div class="toolbar">
+            <h3>Customer Coin Recharge Orders</h3>
+            <select id="payment-status-filter">
+              <option value="">All</option>
+              <option value="paid">Paid</option>
+              <option value="pending">Pending</option>
+              <option value="failed">Failed</option>
+              <option value="refunded">Refunded</option>
+            </select>
+          </div>
+          <div id="payments-table-wrap" class="table-wrap"></div>
+        </div>
+      </section>
+
+      <!-- TAB: Bonuses & Announcements -->
+      <section id="tab-bonuses" class="tab-panel hidden">
+        <div class="two-col">
+          <div class="admin-card">
+            <h3>Create Bonus Rule</h3>
+            <form id="bonus-form" class="grid-form">
+              <div class="field full-span"><label>Rule Name</label><input name="name" type="text" placeholder="e.g. Daily 50 Paid Chats Bonus" required /></div>
+              <div class="field"><label>Bonus Type</label>
+                <select name="bonusType"><option value="fixed">Fixed INR</option><option value="percentage">Percentage</option></select>
+              </div>
+              <div class="field"><label>Metric</label>
+                <select name="metric">
+                  <option value="chats">Paid Chats</option>
+                  <option value="audio_minutes">Audio Minutes</option>
+                  <option value="video_minutes">Video Minutes</option>
+                  <option value="earnings_inr">Earnings INR</option>
+                </select>
+              </div>
+              <div class="field"><label>Period</label>
+                <select name="period"><option value="daily">Daily</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option></select>
+              </div>
+              <div class="field"><label>Target Value</label><input name="targetValue" type="number" min="1" required /></div>
+              <div class="field"><label>Reward Value</label><input name="rewardValue" type="number" min="1" required /></div>
+              <div class="field"><label>Max Bonus (INR)</label><input name="maxBonusInr" type="number" min="1" value="5000" /></div>
+              <div class="full-span"><button type="submit" class="btn primary">Create Bonus Rule</button></div>
+            </form>
+            <div id="bonuses-table-wrap" class="table-wrap" style="margin-top:14px;"></div>
+          </div>
+
+          <div class="admin-card">
+            <h3>Broadcast Notification</h3>
+            <form id="broadcast-form" class="grid-form">
+              <div class="field full-span"><label>Target Audience</label>
+                <select name="targetRole">
+                  <option value="all">All Customers &amp; Executives</option>
+                  <option value="customer">Customers Only</option>
+                  <option value="executive">Executives Only</option>
+                </select>
+              </div>
+              <div class="field full-span"><label>Title</label><input name="title" type="text" required placeholder="Announcement title" /></div>
+              <div class="field full-span"><label>Message</label><textarea name="body" rows="3" required placeholder="Write announcement..."></textarea></div>
+              <div class="full-span"><button type="submit" class="btn primary">Send Broadcast</button></div>
+            </form>
+
+            <h3 style="margin-top: 22px;">Create Sub-Admin User</h3>
+            <form id="subadmin-form" class="grid-form">
+              <div class="field"><label>Name</label><input name="name" type="text" required /></div>
+              <div class="field"><label>Email</label><input name="email" type="email" required /></div>
+              <div class="field"><label>Password (min 6)</label><input name="password" type="password" minlength="6" required /></div>
+              <div class="field"><label>Permissions (comma-sep)</label><input name="permissions" type="text" value="customers,executives,reports" /></div>
+              <div class="full-span"><button type="submit" class="btn ghost">Create Admin</button></div>
+            </form>
+          </div>
+        </div>
+      </section>
+
+      <!-- TAB: Monitoring & Audit Logs -->
+      <section id="tab-monitoring" class="tab-panel hidden">
+        <div class="admin-card">
+          <h3>Active &amp; Recent Call Sessions</h3>
+          <div id="sessions-table-wrap" class="table-wrap"></div>
+        </div>
+        <div class="admin-card" style="margin-top: 16px;">
+          <h3>User Safety Reports</h3>
+          <div id="reports-table-wrap" class="table-wrap"></div>
+        </div>
+        <div class="admin-card" style="margin-top: 16px;">
+          <h3>Immutable Financial Ledger (Latest 100)</h3>
+          <div id="ledger-table-wrap" class="table-wrap"></div>
+        </div>
+        <div class="admin-card" style="margin-top: 16px;">
+          <h3>Admin Audit Logs</h3>
+          <div id="audit-table-wrap" class="table-wrap"></div>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="./config.js"></script>
+  <script type="module" src="./js/admin.js"></script>
+</body>
+</html>
+
